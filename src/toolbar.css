@@ -94,3 +94,5 @@ button { font: inherit; color: inherit; }
 .vertical .lay .mini { width: 12px; height: 21px; }
 
 .warn-pill { -webkit-app-region: no-drag; padding: 5px 10px; border-radius: 999px; background: rgba(255, 59, 85, .18); color: #ff8b9b; font: 600 12px var(--font); white-space: nowrap; }
+
+#b-live.on { background: rgba(123, 128, 255, .35); }

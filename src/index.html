@@ -33,6 +33,11 @@
     <!-- ============================================================ workspace -->
     <main class="workspace">
       <section class="stage-area" id="stage-area">
+        <div class="scene-banner" id="scene-banner" hidden>
+          <i data-icon="clapper" data-size="16"></i>
+          <span class="grow">Nova cena para <b id="scene-banner-title"></b>: clique em Gravar. Ela entra no fim da aula.</span>
+          <button class="btn sm ghost" id="scene-banner-cancel">Cancelar</button>
+        </div>
         <div class="stage" id="stage">
           <canvas id="canvas"></canvas>
           <div class="overlay" id="overlay"></div>
@@ -78,6 +83,21 @@
         <section class="panel">
           <div class="panel-head"><h3>Fundo</h3></div>
           <div class="swatches" id="bg-swatches"></div>
+          <div class="bg-images" id="bg-images"></div>
+          <div class="bg-blur" id="bg-blur-row" hidden>
+            <label class="slider-row"><span>Desfoque</span><input type="range" id="bg-blur" min="0" max="40" step="1" value="0" /><output id="bg-blur-val">0</output></label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h3>Ao vivo na gravação</h3></div>
+          <p class="note" style="margin-top:0">Textos, imagens e stickers que entram direto no vídeo enquanto você grava. Mostre ou esconda a qualquer momento (também pela barra flutuante ou <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd>).</p>
+          <div class="live-add">
+            <button class="btn sm" id="live-add-text"><i data-icon="type" data-size="14"></i> Texto</button>
+            <button class="btn sm" id="live-add-image"><i data-icon="image" data-size="14"></i> Imagem</button>
+            <button class="btn sm" id="live-add-sticker"><i data-icon="smile" data-size="14"></i> Sticker</button>
+          </div>
+          <div class="live-list" id="live-list"></div>
         </section>
       </aside>
     </main>
@@ -180,7 +200,12 @@
           <div class="field">
             <label class="toggle-row">
               <input type="checkbox" class="switch" id="sysaudio" />
-              <span><b>Gravar áudio do computador</b><small>Inclui o som do PC (vídeos, apps) junto com o microfone.</small></span>
+              <span><b>Gravar áudio do computador</b><small>Inclui o som do PC (vídeos, apps) junto com o microfone. Microfone e computador também ficam salvos separados, para equilibrar no editor.</small></span>
+            </label>
+            <label class="slider-row" id="sys-gain-row">
+              <span>Volume do computador</span>
+              <input type="range" id="sys-gain" min="0" max="200" step="1" value="100" />
+              <output id="sys-gain-val">100%</output>
             </label>
           </div>
         </section>
@@ -520,14 +545,28 @@
     </header>
 
     <div class="cut-stage">
-      <div class="cut-player">
-        <video id="cut-video" class="on" preload="auto" muted></video>
-        <video id="cut-video-b" preload="auto" muted></video>
-        <audio id="cut-audio" preload="auto"></audio>
-        <div class="cut-rate-flag" id="cut-rate-flag" hidden>2×</div>
-        <video id="cut-video-t" preload="auto"></video>
-        <div class="cut-removed-flag" id="cut-removed-flag" hidden><i data-icon="scissors" data-size="14"></i> Este trecho será removido</div>
+      <div class="cut-player-area">
+        <div class="cut-player">
+          <div class="cut-fxwrap" id="cut-fxwrap">
+            <div class="cut-zoomwrap" id="cut-zoomwrap">
+              <video id="cut-video" class="on" preload="auto" muted></video>
+              <video id="cut-video-b" preload="auto" muted></video>
+              <video id="cut-video-t" preload="auto"></video>
+            </div>
+          </div>
+          <div class="cut-vignette" id="cut-vignette"></div>
+          <canvas class="cut-ov-canvas" id="cut-ov-canvas"></canvas>
+          <div class="cut-zoom-rect" id="cut-zoom-rect" hidden><span></span></div>
+          <div class="cut-ov-sel" id="cut-ov-sel" hidden>
+            <i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i><b data-h="rot" title="Girar"></b>
+          </div>
+          <audio id="cut-audio" preload="auto"></audio>
+          <div class="cut-rate-flag" id="cut-rate-flag" hidden>2×</div>
+          <div class="cut-removed-flag" id="cut-removed-flag" hidden><i data-icon="scissors" data-size="14"></i> Este trecho será removido</div>
+        </div>
       </div>
+      <aside class="cut-side" id="cut-side"></aside>
+      <div class="cut-ov-media" id="cut-ov-media" hidden></div>
     </div>
 
     <div class="cut-bar">
@@ -589,7 +628,7 @@
         </div>
       </div>
     </div>
-    <p class="cut-hint"><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> volta · pausa · acelera · <b>Arraste</b> para selecionar e aperte <kbd>Del</kbd> para remover · <b>Clique numa emenda</b> (marcador vermelho) para restaurar ou pôr uma transição · <kbd>T</kbd> insere transição na agulha</p>
+    <p class="cut-hint"><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> volta · pausa · acelera · <b>Arraste</b> para selecionar · <kbd>Del</kbd> remove · <kbd>Z</kbd> zoom · <kbd>X</kbd> texto · <kbd>T</kbd> transição · <b>Arraste os blocos</b> das faixas para mover, as pontas para ajustar o tempo</p>
     <video id="cut-thumb-video" muted preload="auto" hidden></video>
   </section>
 
@@ -603,6 +642,21 @@
       <div class="exp-bar"><span id="exp-fill"></span></div>
       <div class="exp-meta"><span id="exp-pct">0%</span><span id="exp-eta"></span></div>
       <button class="btn sm" id="exp-cancel">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ live overlay editor -->
+  <div class="backdrop" id="live-modal" hidden>
+    <div class="modal modal-live" role="dialog" aria-labelledby="live-title">
+      <header class="modal-head"><div><h2 id="live-title">Texto ao vivo</h2><p>Aparece no vídeo enquanto você grava.</p></div><button class="btn ghost icon" data-close title="Fechar"><i data-icon="x"></i></button></header>
+      <div class="live-body">
+        <div>
+          <div class="live-preview"><canvas id="live-canvas" width="960" height="540"></canvas></div>
+          <p class="note">A prévia mostra como fica sobre o vídeo. Arraste na prévia para posicionar.</p>
+        </div>
+        <div class="cs-body" id="live-props"></div>
+      </div>
+      <footer class="modal-foot"><span></span><div class="foot-actions"><button class="btn primary" data-close>Pronto</button></div></footer>
     </div>
   </div>
 

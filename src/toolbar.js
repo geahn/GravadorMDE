@@ -131,6 +131,9 @@ api.bar.onStatus((s) => {
   const warn = !!s.micWarn;
   if ($('#mic-warn').hidden === warn) { $('#mic-warn').hidden = !warn; fitWindow(); }
   if (s.layouts) renderLayouts(s.layouts, s.active);
+  const live = $('#b-live');
+  if (live.hidden !== !s.liveCount) { live.hidden = !s.liveCount; fitWindow(); }
+  live.classList.toggle('on', !!s.liveOn);
 });
 
 $('#layouts').addEventListener('click', (e) => {
@@ -141,6 +144,7 @@ $('#b-pause').addEventListener('click', () => api.bar.action({ type: paused ? 'r
 $('#b-stop').addEventListener('click', () => api.bar.action({ type: 'stop' }));
 $('#b-studio').addEventListener('click', () => api.bar.openStudio());
 $('#b-script').addEventListener('click', () => api.bar.script());
+$('#b-live').addEventListener('click', () => api.bar.action({ type: 'live' }));
 $('#b-discard').addEventListener('click', (e) => {
   const b = e.currentTarget;
   if (b.classList.contains('armed')) {

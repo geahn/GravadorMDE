@@ -3,6 +3,8 @@
 // tracks (MediaStreamTrackProcessor) and pushed into a MediaStreamTrackGenerator,
 // so recording keeps going while the studio window is minimized.
 
+import { drawItem, itemBounds } from './textstyles.js';
+
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
@@ -120,6 +122,13 @@ export class Compositor {
     this.writer = null;
     this.generator = null;
     this.captureTrack = null;
+    this.bgSource = null; // image / pattern background: { img, blur }
+    this.bgCanvas = null;
+    this.camFilter = 'none';
+    this.live = []; // overlays drawn live (texts, images, stickers)
+    this.liveRes = null; // (item) -> { img, w, h } | null
+    this.liveCache = new Map();
+    this.liveAlpha = new Map();
   }
 
   // 1920x1080 (horizontal) or 1080x1920 (vertical).
@@ -128,6 +137,8 @@ export class Compositor {
     this.W = this.canvas.width = w;
     this.H = this.canvas.height = h;
     this.setBackground(this.bg);
+    if (this.bgSource) this.setBackgroundImage(this.bgSource.img, this.bgSource.blur);
+    this.liveCache.clear();
   }
 
   setFeed(name, feed) {
@@ -165,6 +176,29 @@ export class Compositor {
     ctx.globalAlpha = l.opacity ?? 0.9;
     ctx.drawImage(img, x, y, w, h);
     ctx.restore();
+  }
+
+  // A picture (or a generated pattern) as background, covering the frame,
+  // optionally blurred. Rendered once, then copied on every frame.
+  setBackgroundImage(img, blur = 0) {
+    if (!img) { this.bgSource = null; this.bgCanvas = null; return; }
+    this.bgSource = { img, blur };
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return;
+    const c = this.bgCanvas && this.bgCanvas.width === this.W && this.bgCanvas.height === this.H ? this.bgCanvas : document.createElement('canvas');
+    c.width = this.W;
+    c.height = this.H;
+    const ctx = c.getContext('2d');
+    const s = Math.max(this.W / iw, this.H / ih) * (blur > 0 ? 1.06 : 1);
+    const w = iw * s;
+    const h = ih * s;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.W, this.H);
+    ctx.filter = blur > 0 ? `blur(${blur * (this.H / 1080)}px)` : 'none';
+    ctx.drawImage(img, (this.W - w) / 2, (this.H - h) / 2, w, h);
+    ctx.filter = 'none';
+    this.bgCanvas = c;
   }
 
   setBackground(colors) {
@@ -223,19 +257,58 @@ export class Compositor {
     const { ctx } = this;
     ctx.save();
     ctx.globalAlpha = 1;
-    ctx.fillStyle = this.bgFill;
-    ctx.fillRect(0, 0, this.W, this.H);
+    if (this.bgCanvas) ctx.drawImage(this.bgCanvas, 0, 0);
+    else {
+      ctx.fillStyle = this.bgFill;
+      ctx.fillRect(0, 0, this.W, this.H);
+    }
     for (const name of this.order) {
       const d = this.display[name];
       const feed = this.feeds[name];
       if (!d || !feed) continue;
-      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name]);
+      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none');
     }
     this.drawLogo();
+    this.drawLive(now);
     ctx.restore();
   }
 
-  drawLayer(d, feed, mirror, crop = null) {
+  // Live overlays: each one is rendered once to its own small canvas and
+  // fades in/out over 250 ms when shown or hidden.
+  drawLive(now) {
+    const { ctx } = this;
+    const seen = new Set();
+    for (const it of this.live) {
+      seen.add(it.id);
+      const target = it.visible ? 1 : 0;
+      let a = this.liveAlpha.get(it.id);
+      if (!a) { a = { v: target, t: now }; this.liveAlpha.set(it.id, a); }
+      const dt = Math.min(0.1, (now - a.t) / 1000);
+      a.t = now;
+      a.v = target > a.v ? Math.min(target, a.v + dt * 4) : Math.max(target, a.v - dt * 4);
+      if (a.v <= 0.003) continue;
+      const res = this.liveRes ? this.liveRes(it) : null;
+      if ((it.kind === 'image' || it.kind === 'sticker') && !(res && res.w)) continue;
+      const key = `${JSON.stringify({ ...it, visible: 0 })}|${this.W}x${this.H}|${res ? res.w : 0}`;
+      let c = this.liveCache.get(it.id);
+      if (!c || c.key !== key) {
+        const b = itemBounds(it, this.W, this.H, res);
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(2, b.w);
+        cv.height = Math.max(2, b.h);
+        drawItem(cv.getContext('2d'), { ...it, x: cv.width / 2 / this.W, y: cv.height / 2 / this.H, opacity: 1 }, this.W, this.H, res, null);
+        c = { key, cv, cx: b.cx, cy: b.cy };
+        this.liveCache.set(it.id, c);
+      }
+      ctx.save();
+      ctx.globalAlpha = clamp((it.opacity ?? 1) * a.v, 0, 1);
+      ctx.drawImage(c.cv, Math.round(c.cx - c.cv.width / 2), Math.round(c.cy - c.cv.height / 2));
+      ctx.restore();
+    }
+    for (const id of this.liveCache.keys()) if (!seen.has(id)) { this.liveCache.delete(id); this.liveAlpha.delete(id); }
+  }
+
+  drawLayer(d, feed, mirror, crop = null, filter = 'none') {
     if (d.op <= 0.004 || d.w < 2 || d.h < 2) return;
     const { ctx } = this;
     const r = Math.max(0, Math.min(d.r, d.w / 2, d.h / 2));
@@ -264,6 +337,7 @@ export class Compositor {
     const sh = crop ? feed.h * crop.h : feed.h;
     if (img && sw && sh) {
       const c = cropFor(d, sw, sh);
+      if (filter && filter !== 'none') ctx.filter = filter;
       if (mirror) {
         ctx.translate(d.x * 2 + d.w, 0);
         ctx.scale(-1, 1);
@@ -344,4 +418,65 @@ export function createTicker(onTick) {
   const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
   worker.onmessage = () => onTick(performance.now());
   return { setFps: (fps) => worker.postMessage(fps) };
+}
+
+// ------------------------------------------------------------------ generated backgrounds
+
+export const BG_PATTERNS = [
+  { id: 'malha', name: 'Malha violeta' },
+  { id: 'aurora', name: 'Aurora' },
+  { id: 'sol', name: 'Pôr do sol' },
+  { id: 'pontos', name: 'Pontos' },
+  { id: 'grade', name: 'Grade' },
+  { id: 'papel', name: 'Papel' },
+];
+
+export function patternCanvas(id, W = 1920, H = 1080) {
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext('2d');
+  const blob = (x, y, r, color) => {
+    const g = ctx.createRadialGradient(x * W, y * H, 0, x * W, y * H, r * Math.max(W, H));
+    g.addColorStop(0, color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  };
+  const base = (color) => { ctx.fillStyle = color; ctx.fillRect(0, 0, W, H); };
+  if (id === 'malha') {
+    base('#0f1024');
+    blob(0.15, 0.2, 0.55, 'rgba(123,128,255,0.75)');
+    blob(0.85, 0.3, 0.5, 'rgba(244,114,182,0.6)');
+    blob(0.5, 0.95, 0.6, 'rgba(56,189,248,0.45)');
+  } else if (id === 'aurora') {
+    base('#04151a');
+    blob(0.2, 0.8, 0.6, 'rgba(61,220,151,0.55)');
+    blob(0.75, 0.15, 0.55, 'rgba(14,165,233,0.55)');
+    blob(0.95, 0.9, 0.4, 'rgba(167,139,250,0.4)');
+  } else if (id === 'sol') {
+    base('#1d0b14');
+    blob(0.5, 1.05, 0.75, 'rgba(255,140,66,0.85)');
+    blob(0.1, 0.1, 0.5, 'rgba(255,59,85,0.45)');
+    blob(0.9, 0.2, 0.45, 'rgba(245,184,74,0.35)');
+  } else if (id === 'pontos') {
+    base('#14161c');
+    ctx.fillStyle = 'rgba(255,255,255,0.13)';
+    const step = Math.round(H / 36);
+    for (let y = step / 2; y < H; y += step) for (let x = step / 2; x < W; x += step) { ctx.beginPath(); ctx.arc(x, y, step * 0.09, 0, Math.PI * 2); ctx.fill(); }
+    blob(0.5, 0.5, 0.6, 'rgba(123,128,255,0.12)');
+  } else if (id === 'grade') {
+    base('#101217');
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = Math.max(1, H / 900);
+    const step = Math.round(H / 18);
+    for (let x = 0; x <= W; x += step) { ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); ctx.stroke(); }
+    for (let y = 0; y <= H; y += step) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+    blob(0.5, 0.45, 0.65, 'rgba(56,189,248,0.10)');
+  } else {
+    base('#f3efe6');
+    blob(0.2, 0.2, 0.6, 'rgba(255,255,255,0.7)');
+    blob(0.85, 0.85, 0.55, 'rgba(214,200,175,0.45)');
+  }
+  return c;
 }

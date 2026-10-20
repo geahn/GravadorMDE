@@ -15,6 +15,9 @@ fs.mkdirSync(out, { recursive: true });
 const SLOT = { intro: 'horizontal', introV: 'vertical', transition: 'transicao-horizontal', transitionV: 'transicao-vertical', logo: 'logo' };
 const prefs = { ...(src.prefs || {}) };
 delete prefs.outDir; // each person uses their own Videos folder
+// Pictures picked on this computer live in its own app folder: not portable.
+delete prefs.bgImages;
+prefs.liveOverlays = (prefs.liveOverlays || []).filter((o) => o.kind !== 'image');
 for (const [key, slot] of Object.entries(SLOT)) {
   const it = prefs[key];
   if (!it || !it.path || !fs.existsSync(it.path)) { prefs[key] = null; continue; }
@@ -29,7 +32,7 @@ const defaults = {
   prefs,
   layoutSets: src.layoutSets,
   active: src.active,
-  bg: src.bg,
+  bg: src.bg && src.bg.key === 'image' ? { key: 'grafite' } : src.bg,
   orientation: src.orientation,
   screenAspect: src.screenAspect,
 };

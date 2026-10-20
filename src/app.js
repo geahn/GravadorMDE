@@ -1,7 +1,10 @@
 import {
   DIMS, PRESETS, BACKGROUNDS, MAX_LAYOUTS, defaultScene, defaultLayouts, makeLayout, newId,
 } from './layouts.js';
-import { Compositor, Feed, createTicker } from './compositor.js';
+import { Compositor, Feed, createTicker, BG_PATTERNS, patternCanvas, cropFor } from './compositor.js';
+import { cssFilter, FX_PRESETS } from './fx.js';
+import { STICKERS, stickerUrl, TEXT_STYLES, BASE_STYLE } from './textstyles.js';
+import { bindFields, textPropsHTML, styleCardsHTML, paintStyleCards, posHTML, range as fRange, color as fColor } from './cutpanel.js';
 import { AudioMixer } from './audio.js';
 import { Editor } from './editor.js';
 import { Cutter } from './cutter.js';
@@ -55,6 +58,12 @@ const prefs = {
   logoOpacity: 0.9,
   mdeAuto: false, // send to the MDE lessons panel right after exporting
   mdeBaseUrl: '', // empty = default API address
+  sysGain: 1, // volume of the computer audio while recording
+  cameraFilter: null, // { name, p }: color filter applied live to the camera
+  userTextStyles: [], // text styles saved by the user
+  userFilters: [], // color filters saved by the user
+  liveOverlays: [], // texts / images / stickers drawn live into the recording
+  bgImages: [], // background pictures { path, url, name }
   ...(saved.prefs || {}),
 };
 if (!QUALITY[prefs.quality]) prefs.quality = 'standard';
@@ -180,6 +189,11 @@ const cutter = new Cutter({
   onSetupTransition: () => openSettings('transition'),
   getFps: () => prefs.fps,
   onExport: (project, opts) => exportProject(project, opts),
+  getPrefs: () => prefs,
+  setPrefs: (patch) => { Object.assign(prefs, patch); persist(); },
+  onNewScene: (project) => beginSceneAppend(project),
+  onCameraFilter: (f) => setCameraFilter(f),
+  onExportAudio: (format) => exportAudio(format),
   onClose: (why) => {
     if (why === 'discarded') toast('Gravação enviada para a Lixeira.');
     if (why === 'draft') toast('Rascunho salvo com os cortes. Continue quando quiser pela Galeria.', 'ok', 5000, { label: 'Abrir galeria', onClick: () => setView('gallery') });
@@ -639,8 +653,33 @@ function bgColors() {
   return (BACKGROUNDS.find((b) => b.key === S.bg.key) || BACKGROUNDS[0]).colors;
 }
 
+const bgImgCache = new Map();
+function loadImage(url) {
+  if (!bgImgCache.has(url)) {
+    bgImgCache.set(url, new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = rej;
+      img.src = url;
+    }));
+  }
+  return bgImgCache.get(url);
+}
+
 function applyBackground() {
+  const bg = S.bg;
   compositor.setBackground(bgColors());
+  if (bg.key === 'pattern') {
+    compositor.setBackgroundImage(patternCanvas(bg.id, compositor.W, compositor.H), bg.blur || 0);
+  } else if (bg.key === 'image' && bg.url) {
+    loadImage(bg.url).then((img) => {
+      if (S.bg === bg) compositor.setBackgroundImage(img, bg.blur || 0);
+    }).catch(() => {
+      if (S.bg === bg) { compositor.setBackgroundImage(null); toast('Não consegui abrir a imagem de fundo.', 'error'); }
+    });
+  } else {
+    compositor.setBackgroundImage(null);
+  }
 }
 
 // ================================================================== layouts: create / rename / duplicate / delete
@@ -1100,6 +1139,14 @@ function renderProps() {
 
     <label class="prop-inline"><span>Sombra</span><input type="checkbox" class="switch" data-check="shadow" /></label>
     ${isCam ? '<label class="prop-inline"><span>Espelhar imagem</span><input type="checkbox" class="switch" data-check="mirror" /></label>' : ''}
+    ${isCam ? `<div class="prop">
+      <div class="prop-label"><span>Filtro da câmera</span></div>
+      <select class="cs-select" data-cam-filter>
+        <option value="">Nenhum</option>
+        ${FX_PRESETS.map((f) => `<option value="${f.id}" ${prefs.cameraFilter && prefs.cameraFilter.name === f.name ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
+        ${(prefs.userFilters || []).length ? `<optgroup label="Meus filtros">${prefs.userFilters.map((f) => `<option value="u-${esc(f.id)}" ${prefs.cameraFilter && prefs.cameraFilter.name === f.name ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</optgroup>` : ''}
+      </select>
+    </div>` : ''}
 
     <div class="prop-actions">
       <button class="btn sm" data-act="center">Centralizar</button>
@@ -1181,6 +1228,10 @@ function bindProps() {
       editLayer(name, { shadow: t.checked });
     } else if (t.dataset.check === 'mirror') {
       setMirror(t.checked);
+    } else if (t.matches('[data-cam-filter]')) {
+      const v = t.value;
+      const f = !v ? null : v.startsWith('u-') ? prefs.userFilters.find((x) => `u-${x.id}` === v) : FX_PRESETS.find((x) => x.id === v);
+      setCameraFilter(f ? { name: f.name, p: { ...f.p } } : null);
     }
   });
   el.addEventListener('click', (e) => {
@@ -1230,7 +1281,30 @@ function setMirror(on) {
   syncProps();
 }
 
+const patternThumbs = new Map();
+function patternThumb(id) {
+  if (!patternThumbs.has(id)) patternThumbs.set(id, patternCanvas(id, 160, 90).toDataURL('image/jpeg', 0.85));
+  return patternThumbs.get(id);
+}
+
+function renderBgImages() {
+  const box = $('#bg-images');
+  const on = (key, id) => S.bg.key === key && (S.bg.id === id || S.bg.url === id);
+  box.innerHTML = BG_PATTERNS.map((p) => `<button class="bg-img ${on('pattern', p.id) ? 'on' : ''}" data-bg-pattern="${p.id}" title="${esc(p.name)}" style="background-image:url('${patternThumb(p.id)}')"></button>`).join('')
+    + (prefs.bgImages || []).map((b) => `<button class="bg-img ${on('image', b.url) ? 'on' : ''}" data-bg-image="${esc(b.url)}" title="${esc(b.name)}" style="background-image:url('${esc(b.url)}')">
+        <span class="cs-del" data-bg-del="${esc(b.url)}" title="Tirar da lista">${icon('x', 11)}</span></button>`).join('')
+    + `<button class="bg-img add" id="bg-add" title="Usar uma imagem como fundo">${icon('image', 16)}</button>`;
+  const img = S.bg.key === 'image' || S.bg.key === 'pattern';
+  $('#bg-blur-row').hidden = !img;
+  if (img) {
+    $('#bg-blur').value = S.bg.blur || 0;
+    setRangeFill($('#bg-blur'));
+    $('#bg-blur-val').textContent = String(S.bg.blur || 0);
+  }
+}
+
 function renderBackgrounds() {
+  renderBgImages();
   const custom = S.bg.key === 'custom';
   $('#bg-swatches').innerHTML = BACKGROUNDS.map((b) => `
     <button class="swatch ${S.bg.key === b.key ? 'on' : ''}" data-bg="${b.key}" title="${b.name}"
@@ -1368,6 +1442,7 @@ function openSources() {
   setRangeFill($('#mic-gain'));
   $('#noise').checked = prefs.noise;
   $('#sysaudio').checked = prefs.systemAudio;
+  renderSysGain();
   loadSources();
   clearInterval(srcRefreshTimer);
   srcRefreshTimer = setInterval(() => { if (!$('#sources-modal').hidden) loadSources(); }, 5000);
@@ -1409,7 +1484,13 @@ function bindSources() {
     persist();
     if (S.micId) setMic(S.micId);
   });
-  $('#sysaudio').addEventListener('change', (e) => setSystemAudio(e.target.checked));
+  $('#sysaudio').addEventListener('change', (e) => { setSystemAudio(e.target.checked); renderSysGain(); });
+  $('#sys-gain').addEventListener('input', (e) => {
+    prefs.sysGain = Number(e.target.value) / 100;
+    mixer.setSysGain(prefs.sysGain);
+    renderSysGain();
+    persist();
+  });
   $('#sources-done').addEventListener('click', closeSources);
 }
 
@@ -1685,6 +1766,7 @@ const R = {
   pausedTotal: 0,
   stereo: false,
   orientation: 'h',
+  append: null, // { folder, title, orientation }: the next recording is a new scene of that lesson
 };
 
 function pickMime(fps) {
@@ -1736,12 +1818,15 @@ const busyElsewhere = () => cutter.isOpen || !$('#export-overlay').hidden;
 
 function makeRecorder(key, stream, mime) {
   const mult = prefs.fps > 30 ? 1.5 : 1;
-  const recorder = new MediaRecorder(stream, {
-    mimeType: mime,
-    videoBitsPerSecond: Math.round(RAW_BPS[key] * mult),
-    audioBitsPerSecond: 192000,
-    videoKeyFrameIntervalDuration: 2000,
-  });
+  const audioOnly = key === 'mic' || key === 'sys';
+  const recorder = new MediaRecorder(stream, audioOnly
+    ? { mimeType: mime, audioBitsPerSecond: 160000 }
+    : {
+      mimeType: mime,
+      videoBitsPerSecond: Math.round(RAW_BPS[key] * mult),
+      audioBitsPerSecond: 192000,
+      videoKeyFrameIntervalDuration: 2000,
+    });
   R.chains[key] = Promise.resolve();
   recorder.ondataavailable = (e) => {
     if (!e.data || !e.data.size) return;
@@ -1783,14 +1868,18 @@ async function startRecording() {
   closeLayoutMenu();
   if (view !== 'studio') setView('studio');
   editor.select(null);
+  if (R.append && R.append.orientation !== S.orientation) setOrientation(R.append.orientation);
   R.state = 'arming';
   setRecUI();
   const tracks = prefs.recordMode === 'all'
     ? ['camera', 'screen'].filter((k) => feeds[k] && feeds[k].track.readyState === 'live')
     : [];
   const ext = mime.startsWith('video/mp4') ? '.mp4' : mime.includes('matroska') ? '.mkv' : '.webm';
+  // Microphone and computer audio also saved apart, to balance them in the editor.
+  const audioMime = ['audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+  const sidecars = prefs.systemAudio && streams.sys && streams.mic && audioMime ? ['mic', 'sys'] : [];
   try {
-    R.file = await api.rec.prepare({ outDir: prefs.outDir, ext, tracks });
+    R.file = await api.rec.prepare({ outDir: prefs.outDir, ext, tracks, sidecars, append: R.append ? R.append.folder : null });
   } catch (err) {
     R.state = 'idle';
     setRecUI();
@@ -1820,6 +1909,12 @@ async function startRecording() {
     R.clones.push(clone);
     R.recorders[key] = makeRecorder(key, new MediaStream([clone, mixer.track]), mime);
   }
+  if (sidecars.length) {
+    R.recorders.mic = makeRecorder('mic', new MediaStream([mixer.micTrack]), audioMime);
+    R.recorders.sys = makeRecorder('sys', new MediaStream([mixer.sysTrack]), audioMime);
+  }
+  R.cursor = [];
+  R.cursorAt = 0;
 
   R.state = 'countdown';
   setRecUI();
@@ -1894,25 +1989,33 @@ async function stopRecording({ discard = false } = {}) {
   try {
     if (discard) {
       await api.rec.discard();
-      toast('Gravação descartada.');
+      toast(R.append ? 'Cena descartada. A aula continua como estava.' : 'Gravação descartada.');
     } else {
       const d = DIMS[R.orientation];
+      const appending = R.append;
       const res = await api.rec.finish({
         mime: R.mime,
-        meta: { orientation: R.orientation, width: d.w, height: d.h, fps: prefs.fps, stereo: R.stereo, screenCrop: activeCrop() },
+        meta: {
+          orientation: R.orientation, width: d.w, height: d.h, fps: prefs.fps, stereo: R.stereo, screenCrop: activeCrop(), cursor: R.cursor || [],
+        },
       });
       if (res.warning) toast(res.warning, 'error', 9000);
       project = {
         ...res,
         original: true,
-        stereo: R.stereo,
+        stereo: appending ? true : R.stereo,
         orientation: R.orientation,
         width: d.w,
         height: d.h,
         duration: res.duration || duration / 1000,
-        removed: [],
+        removed: res.removed || [],
         introApplied: false,
       };
+      if (appending) {
+        endSceneAppend();
+        toast(`Nova cena adicionada ao fim de “${res.title}”. Arraste na faixa Cenas para mudar a ordem.`, 'ok', 7000);
+        project.forceEditor = true;
+      }
       gallery.markStale();
     }
   } catch (err) {
@@ -1929,7 +2032,7 @@ async function stopRecording({ discard = false } = {}) {
 
 function openProject(project) {
   closeModals();
-  if (prefs.openEditor) cutter.open(project);
+  if (prefs.openEditor || project.forceEditor) cutter.open(project);
   else exportProject(project, { seq: null, removed: [], inserts: [], audioDelay: prefs.audioDelay, intro: prefs.introEnabled ? introFor(project.orientation) : null });
 }
 
@@ -1960,6 +2063,8 @@ function sendBarStatus() {
     orientation: S.orientation,
     micOn: !!streams.mic,
     micWarn: !!R.micWarn,
+    liveCount: prefs.liveOverlays.length,
+    liveOn: prefs.liveOverlays.some((o) => o.visible),
   });
 }
 
@@ -1973,12 +2078,15 @@ function showBusy(on, title = 'Finalizando seu vídeo…') {
 const EXP = { start: 0, intro: false, tracks: 0 };
 const PHASE_LABEL = {
   audio: () => 'Analisando e nivelando o áudio…',
+  audioOnly: () => 'Gerando o áudio editado…',
   video: () => `Cortando${EXP.intro ? ', adicionando a intro' : ''} e comprimindo o vídeo final…`,
   camera: () => 'Comprimindo o arquivo da câmera…',
   screen: () => 'Comprimindo o arquivo da tela…',
 };
 
-async function exportProject(project, { seq, removed, inserts, audioDelay, intro, transition, title }) {
+async function exportProject(project, {
+  seq, removed, inserts, audioDelay, intro, transition, title, post, audioFx, sidecars, edits,
+}) {
   EXP.start = 0;
   EXP.intro = !!intro;
   EXP.tracks = (project.tracks || []).length;
@@ -2008,6 +2116,10 @@ async function exportProject(project, { seq, removed, inserts, audioDelay, intro
       level: prefs.levelAudio,
       hasAudio: project.hasAudio !== false,
       trashOriginals: project.original && !prefs.keepOriginal,
+      post: post || null,
+      audioFx: audioFx || null,
+      sidecars: sidecars || null,
+      edits: edits || null,
     });
     if (cutter.isOpen) cutter.close();
     // The title typed in the editor names the lesson folder/files and the MDE lesson.
@@ -2143,6 +2255,15 @@ function editItem(item) {
     screenCrop: e.screenCrop || null,
     inserts: e.inserts || [],
     audioDelay: Number.isFinite(e.audioDelay) ? e.audioDelay : undefined,
+    scenes: e.scenes,
+    speeds: e.speeds,
+    speed: e.speed,
+    zooms: e.zooms,
+    overlays: e.overlays,
+    fx: e.fx,
+    fxGlobal: e.fxGlobal,
+    audioFx: e.audioFx,
+    sidecars: e.sidecars || null,
     tracks: e.tracks,
     stereo: item.stereo,
     hasAudio: item.hasAudio,
@@ -2191,7 +2312,10 @@ const ticker = createTicker((now) => {
   // While editing, exporting or browsing nothing is being recorded: leave the CPU to them.
   if ((busyElsewhere() || gallery.isOpen) && !recordingNow) return;
   compositor.draw(now);
-  if (R.state === 'recording') compositor.pushFrame();
+  if (R.state === 'recording') {
+    compositor.pushFrame();
+    sampleCursor(now);
+  }
 
   tickCount += 1;
   if (tickCount % 2 === 0) {
@@ -2224,7 +2348,9 @@ function fitStage() {
   const hint = $('#stage-hint');
   const cs = getComputedStyle(area);
   const availW = area.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  const availH = area.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - hint.offsetHeight - 14;
+  const banner = $('#scene-banner');
+  const availH = area.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - hint.offsetHeight - 14
+    - (banner && !banner.hidden ? banner.offsetHeight + 10 : 0);
   const d = dims();
   const ratio = d.h / d.w;
   let w = availW;
@@ -2405,6 +2531,8 @@ function bindRecordingEvents() {
       stopRecording();
     } else if (name === 'pause') {
       togglePause();
+    } else if (name === 'live') {
+      toggleLiveAll();
     } else if (name.startsWith('layout:')) {
       const l = layouts()[Number(name.split(':')[1])];
       if (l) setActiveLayout(l.id);
@@ -2415,11 +2543,374 @@ function bindRecordingEvents() {
     if (a.type === 'pause' || a.type === 'resume') togglePause();
     else if (a.type === 'stop') stopRecording();
     else if (a.type === 'discard') stopRecording({ discard: true });
+    else if (a.type === 'live') toggleLiveAll();
     else if (a.type === 'layout') {
       const l = layouts()[a.index];
       if (l) setActiveLayout(l.id);
     }
   });
+}
+
+// ================================================================== scenes (continue a lesson)
+
+// From the editor: the next recording becomes a new scene of that lesson.
+function beginSceneAppend(project) {
+  R.append = {
+    folder: project.folder,
+    title: $('#cut-title-input').value.trim() || project.title || 'aula',
+    orientation: orientationOfProject(project),
+  };
+  setView('studio');
+  if (S.orientation !== R.append.orientation) setOrientation(R.append.orientation);
+  $('#scene-banner-title').textContent = R.append.title;
+  $('#scene-banner').hidden = false;
+  fitStage();
+  gallery.markStale();
+  toast('Prepare a cena e clique em Gravar. Ela entra no fim da aula.', 'info', 5000);
+}
+
+function endSceneAppend() {
+  R.append = null;
+  $('#scene-banner').hidden = true;
+  fitStage();
+}
+
+// ================================================================== mouse position (for zooms that follow the mouse)
+
+// Samples where the mouse is (15 times per second) and maps it onto the
+// recorded frame, through the screen area crop and the layout of the screen layer.
+function sampleCursor(now) {
+  if (R.cursorBusy || now - (R.cursorAt || 0) < 66 || !S.screen || S.screen.type !== 'screen' || !feeds.screen) return;
+  R.cursorAt = now;
+  R.cursorBusy = true;
+  const t = elapsed() / 1000;
+  api.cursor(S.screen.displayId).then((p) => {
+    R.cursorBusy = false;
+    if (R.state !== 'recording' || !R.cursor) return;
+    const d = compositor.display.screen;
+    const size = compositor.sourceSize('screen');
+    if (!p || !d || d.op < 0.5 || !size) { R.cursor.push([Number(t.toFixed(3)), -1, -1]); return; }
+    let fx = p.x;
+    let fy = p.y;
+    const c = compositor.crops.screen;
+    if (c) { fx = (fx - c.x) / c.w; fy = (fy - c.y) / c.h; }
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) { R.cursor.push([Number(t.toFixed(3)), -1, -1]); return; }
+    const v = cropFor(d, size.w, size.h);
+    const X = d.x + ((fx * size.w - v.sx) / v.vw) * d.w;
+    const Y = d.y + ((fy * size.h - v.sy) / v.vh) * d.h;
+    R.cursor.push([Number(t.toFixed(3)), Number((X / compositor.W).toFixed(4)), Number((Y / compositor.H).toFixed(4))]);
+  }).catch(() => { R.cursorBusy = false; });
+}
+
+// ================================================================== camera filter / computer audio volume
+
+function setCameraFilter(f) {
+  prefs.cameraFilter = f || null;
+  compositor.camFilter = f ? cssFilter(f.p, 'cam-fx', { blurScale: 1 }) : 'none';
+  persist();
+  if (editor.selected === 'camera') renderProps();
+}
+
+function renderSysGain() {
+  const row = $('#sys-gain-row');
+  row.hidden = !prefs.systemAudio;
+  $('#sys-gain').value = Math.round(prefs.sysGain * 100);
+  $('#sys-gain-val').textContent = `${Math.round(prefs.sysGain * 100)}%`;
+  setRangeFill($('#sys-gain'));
+}
+
+// ================================================================== audio export (editor)
+
+async function exportAudio(format) {
+  const p = cutter.p;
+  if (!p) return;
+  let job;
+  try {
+    job = await cutter.audioJob({
+      source: p.path,
+      duration: cutter.duration,
+      fps: prefs.fps,
+      stereo: p.stereo,
+      hasAudio: p.hasAudio !== false,
+      level: prefs.levelAudio,
+      sidecars: p.sidecars || null,
+      title: cutter.title(),
+      folder: p.folder || null,
+      format,
+    });
+  } catch (err) {
+    toast(`Não consegui preparar o áudio. ${cleanError(err)}`, 'error');
+    return;
+  }
+  EXP.start = 0;
+  $('#exp-title').textContent = 'Exportando o áudio…';
+  setExportProgress({ phase: 'audioOnly', overall: 0 });
+  cutter.pause();
+  $('#export-overlay').hidden = false;
+  try {
+    const res = await api.exporter.audio(job);
+    if (res) toast(`Áudio salvo: ${res.path.split(/[\\/]/).pop()}`, 'ok', 8000, { label: 'Mostrar na pasta', onClick: () => api.showItem(res.path) });
+  } catch (err) {
+    const msg = cleanError(err);
+    if (/cancelled/.test(msg)) toast('Exportação do áudio cancelada.');
+    else toast(`Não foi possível exportar o áudio. ${msg.slice(0, 300)}`, 'error', 12000);
+  } finally {
+    $('#export-overlay').hidden = true;
+  }
+}
+
+// ================================================================== backgrounds with pictures
+
+function bindBackgroundImages() {
+  $('#bg-images').addEventListener('click', async (e) => {
+    const del = e.target.closest('[data-bg-del]');
+    if (del) {
+      e.stopPropagation();
+      const url = del.dataset.bgDel;
+      prefs.bgImages = (prefs.bgImages || []).filter((b) => b.url !== url);
+      if (S.bg.key === 'image' && S.bg.url === url) { S.bg = { key: 'grafite' }; applyBackground(); }
+      persist();
+      renderBackgrounds();
+      return;
+    }
+    const pat = e.target.closest('[data-bg-pattern]');
+    const img = e.target.closest('[data-bg-image]');
+    if (pat || img) {
+      beginChange();
+      S.bg = pat ? { key: 'pattern', id: pat.dataset.bgPattern, blur: 0 }
+        : { key: 'image', url: img.dataset.bgImage, path: (prefs.bgImages.find((b) => b.url === img.dataset.bgImage) || {}).path, blur: 0 };
+      applyBackground();
+      commitChange(true);
+      renderBackgrounds();
+      return;
+    }
+    if (e.target.closest('#bg-add')) {
+      try {
+        const m = await api.media.pick({ purpose: 'background' });
+        if (!m) return;
+        prefs.bgImages = [{ path: m.path, url: m.url, name: m.name }, ...(prefs.bgImages || [])].slice(0, 16);
+        beginChange();
+        S.bg = { key: 'image', url: m.url, path: m.path, blur: 0 };
+        applyBackground();
+        commitChange(true);
+        renderBackgrounds();
+      } catch (err) {
+        toast(`Não foi possível usar essa imagem. ${cleanError(err)}`, 'error');
+      }
+    }
+  });
+  $('#bg-blur').addEventListener('pointerdown', () => beginChange());
+  $('#bg-blur').addEventListener('input', (e) => {
+    if (S.bg.key !== 'image' && S.bg.key !== 'pattern') return;
+    S.bg = { ...S.bg, blur: Number(e.target.value) };
+    $('#bg-blur-val').textContent = e.target.value;
+    setRangeFill(e.target);
+    applyBackground();
+  });
+  $('#bg-blur').addEventListener('change', () => commitChange(true));
+}
+
+// ================================================================== live overlays (drawn into the recording)
+
+const liveImgs = new Map();
+function liveRes(it) {
+  if (it.kind !== 'image' && it.kind !== 'sticker') return null;
+  const url = it.kind === 'sticker' ? stickerUrl(it.sticker, it.color) : it.src && it.src.url;
+  if (!url) return null;
+  let r = liveImgs.get(url);
+  if (!r) {
+    r = { w: 0, h: 0, img: new Image() };
+    r.img.onload = () => { r.w = r.img.naturalWidth; r.h = r.img.naturalHeight; compositor.liveCache.clear(); };
+    r.img.src = url;
+    liveImgs.set(url, r);
+  }
+  return r;
+}
+
+let liveSaveTimer = null;
+function liveChanged() {
+  clearTimeout(liveSaveTimer);
+  liveSaveTimer = setTimeout(persist, 400);
+  renderLiveList();
+  sendBarStatus();
+}
+
+function liveName(o) {
+  if (o.kind === 'text') return String(o.text || 'Texto').split('\n')[0] || 'Texto';
+  if (o.kind === 'image') return (o.src && o.src.name) || 'Imagem';
+  return `Sticker · ${(STICKERS.find((x) => x.id === o.sticker) || {}).name || ''}`;
+}
+
+function renderLiveList() {
+  const list = prefs.liveOverlays;
+  $('#live-list').innerHTML = list.map((o) => `
+    <div class="live-row ${o.visible ? '' : 'off'}" data-live="${esc(o.id)}">
+      <span class="grow" title="${esc(liveName(o))}">${icon(o.kind === 'text' ? 'type' : o.kind === 'image' ? 'image' : 'smile', 14)} ${esc(liveName(o))}</span>
+      <button class="btn ghost sm icon" data-live-eye title="${o.visible ? 'Esconder' : 'Mostrar'} no vídeo">${icon(o.visible ? 'eye' : 'eyeOff', 15)}</button>
+      <button class="btn ghost sm icon" data-live-edit title="Editar">${icon('pencil', 14)}</button>
+      <button class="btn ghost sm icon" data-live-del title="Excluir">${icon('trash', 14)}</button>
+    </div>`).join('');
+}
+
+function toggleLiveAll() {
+  const list = prefs.liveOverlays;
+  if (!list.length) return;
+  const on = list.some((o) => o.visible);
+  for (const o of list) o.visible = !on;
+  liveChanged();
+  toast(on ? 'Textos e imagens ao vivo escondidos.' : 'Textos e imagens ao vivo na tela.', 'info', 2000);
+}
+
+let liveEditing = null;
+const liveOpen = new Set(['fonte', 'cor', 'pos']);
+
+function liveItem() {
+  return prefs.liveOverlays.find((o) => o.id === liveEditing) || null;
+}
+
+function renderLiveProps() {
+  const o = liveItem();
+  const box = $('#live-props');
+  if (!o) { box.innerHTML = ''; return; }
+  if (o.kind === 'text') {
+    box.innerHTML = `${textPropsHTML(o, { open: liveOpen, anim: false })}
+      <div class="cs-subtitle">Estilos</div>${styleCardsHTML(prefs.userTextStyles || [])}`;
+    paintStyleCards(box, prefs.userTextStyles || []);
+  } else {
+    box.innerHTML = `
+      ${fRange('w', 'Tamanho', o.w || 0.2, 0.03, 1.2, 0.005, 'pct')}
+      ${o.kind === 'sticker' ? `${fColor('color', 'Cor', o.color || '#ff3b55')}
+        <div class="cs-stickers">${STICKERS.map((st) => `<button data-live-sticker="${st.id}" title="${esc(st.name)}"><img src="${stickerUrl(st.id, o.color || '#ff3b55')}" alt="" /></button>`).join('')}</div>` : ''}
+      ${o.kind === 'image' ? fRange('radius', 'Cantos arredondados', o.radius || 0, 0, 0.5, 0.01, 'pct') : ''}
+      <label class="cs-check"><input type="checkbox" class="switch sm" data-k="shadow" data-t="bool" ${o.shadow ? 'checked' : ''} /><span>Sombra</span></label>
+      ${posHTML(o, new Set(['pos']), { anim: false })}`;
+  }
+}
+
+function openLive(id) {
+  liveEditing = id;
+  const o = liveItem();
+  if (!o) return;
+  $('#live-title').textContent = { text: 'Texto ao vivo', image: 'Imagem ao vivo', sticker: 'Sticker ao vivo' }[o.kind];
+  const v = S.orientation === 'v';
+  const cv = $('#live-canvas');
+  cv.width = v ? 405 : 960;
+  cv.height = v ? 720 : 540;
+  $('.live-preview').style.aspectRatio = v ? '9 / 16' : '16 / 9';
+  $('.live-preview').style.maxHeight = v ? '460px' : '';
+  $('.live-preview').style.margin = v ? '0 auto' : '';
+  renderLiveProps();
+  $('#live-modal').hidden = false;
+  const draw = () => {
+    if ($('#live-modal').hidden) return;
+    cv.getContext('2d').drawImage(compositor.canvas, 0, 0, cv.width, cv.height);
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+}
+
+function addLive(kind, extra = {}) {
+  const base = { id: `lv${Date.now().toString(36)}`, kind, visible: true, x: 0.5, y: 0.85, rot: 0, opacity: 1 };
+  let o;
+  if (kind === 'text') o = { ...base, text: 'Seu texto aqui', style: { ...TEXT_STYLES.find((t) => t.id === 'tercoinf').style, align: 'center' }, scale: 1 };
+  else if (kind === 'sticker') o = { ...base, y: 0.5, sticker: 'seta-direita', color: '#ff3b55', w: 0.12, shadow: true };
+  else o = { ...base, y: 0.5, w: 0.25, radius: 0.04, shadow: true, ...extra };
+  prefs.liveOverlays.push(o);
+  liveChanged();
+  openLive(o.id);
+}
+
+function bindLive() {
+  compositor.live = prefs.liveOverlays;
+  compositor.liveRes = liveRes;
+  $('#live-add-text').addEventListener('click', () => addLive('text'));
+  $('#live-add-sticker').addEventListener('click', () => addLive('sticker'));
+  $('#live-add-image').addEventListener('click', async () => {
+    try {
+      const m = await api.media.pick({ purpose: 'overlay' });
+      if (!m) return;
+      if (m.kind !== 'image') { toast('Ao vivo dá para usar imagens. Vídeos você insere no editor, depois de gravar.', 'info', 6000); return; }
+      addLive('image', { src: m, w: Math.min(0.3, (0.4 * compositor.H * (m.w / m.h)) / compositor.W) });
+    } catch (err) {
+      toast(`Não foi possível usar essa imagem. ${cleanError(err)}`, 'error');
+    }
+  });
+  $('#live-list').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-live]');
+    if (!row) return;
+    const list = prefs.liveOverlays;
+    const o = list.find((x) => x.id === row.dataset.live);
+    if (!o) return;
+    if (e.target.closest('[data-live-eye]')) { o.visible = !o.visible; liveChanged(); }
+    else if (e.target.closest('[data-live-del]')) { list.splice(list.indexOf(o), 1); liveChanged(); }
+    else openLive(o.id);
+  });
+  const box = $('#live-props');
+  bindFields(box, {
+    get: liveItem,
+    patch: (p, k) => {
+      const o = liveItem();
+      if (!o) return;
+      if (p.style && p.style.gradient && !Array.isArray(p.style.gradient)) p.style.gradient = [p.style.gradient[0], p.style.gradient[1]];
+      Object.assign(o, p);
+      liveChanged();
+      if (['style.bg', 'style.stroke', 'style.border', 'style.glow', 'color'].includes(k)) renderLiveProps();
+    },
+    commit: (fromClick) => { persist(); if (fromClick === true) renderLiveProps(); },
+  });
+  box.addEventListener('change', (e) => {
+    if (!e.target.matches('[data-act="gradient"]')) return;
+    const o = liveItem();
+    if (!o) return;
+    o.style = { ...o.style, gradient: e.target.checked ? ['#ffffff', '#7b80ff'] : null };
+    liveChanged();
+    renderLiveProps();
+  });
+  box.addEventListener('keydown', (e) => e.stopPropagation());
+  box.addEventListener('click', (e) => {
+    const o = liveItem();
+    if (!o) return;
+    const st = e.target.closest('[data-style]');
+    const pos = e.target.closest('[data-pos]');
+    const stick = e.target.closest('[data-live-sticker]');
+    if (st) {
+      const def = [...(prefs.userTextStyles || []), ...TEXT_STYLES].find((x) => x.id === st.dataset.style);
+      if (def) { o.style = { ...BASE_STYLE, ...def.style }; liveChanged(); renderLiveProps(); }
+    } else if (pos) {
+      const [x, y] = pos.dataset.pos.split(',').map(Number);
+      Object.assign(o, { x, y });
+      liveChanged();
+      renderLiveProps();
+    } else if (stick) {
+      o.sticker = stick.dataset.liveSticker;
+      liveChanged();
+    } else if (e.target.closest('[data-act="fonts"]')) {
+      toast('As fontes instaladas podem ser carregadas no editor (aba Texto).', 'info');
+    }
+  });
+  // drag on the preview to place it
+  const cv = $('#live-canvas');
+  let drag = null;
+  cv.addEventListener('pointerdown', (e) => {
+    const o = liveItem();
+    if (!o) return;
+    const r = cv.getBoundingClientRect();
+    drag = { sx: e.clientX, sy: e.clientY, ox: o.x, oy: o.y, w: r.width, h: r.height };
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const o = liveItem();
+    if (!drag || !o) return;
+    let x = drag.ox + (e.clientX - drag.sx) / drag.w;
+    let y = drag.oy + (e.clientY - drag.sy) / drag.h;
+    if (Math.abs(x - 0.5) * drag.w < 5) x = 0.5;
+    if (Math.abs(y - 0.5) * drag.h < 5) y = 0.5;
+    o.x = Math.min(1.1, Math.max(-0.1, x));
+    o.y = Math.min(1.1, Math.max(-0.1, y));
+    compositor.liveCache.delete(o.id);
+  });
+  cv.addEventListener('pointerup', () => { if (drag) { drag = null; liveChanged(); } });
+  renderLiveList();
 }
 
 // ================================================================== boot
@@ -2465,7 +2956,16 @@ refreshMdeInfo();
 bindExtras();
 applyLogo();
 renderAreaRow();
+bindBackgroundImages();
+bindLive();
+mixer.setSysGain(prefs.sysGain);
+if (prefs.cameraFilter) setCameraFilter(prefs.cameraFilter);
+$('#scene-banner-cancel').addEventListener('click', () => {
+  endSceneAppend();
+  toast('Tudo bem: a aula continua na Galeria, do jeito que estava.', 'info', 5000, { label: 'Abrir galeria', onClick: () => setView('gallery') });
+});
 
 window.__app = {
   S, R, prefs, compositor, mixer, feeds, cutter, gallery, startRecording, stopRecording, togglePause, setActiveLayout, setOrientation, setView, exportProject,
+  setCameraFilter, addLive, toggleLiveAll, applyBackground, renderBackgrounds,
 };

@@ -196,6 +196,7 @@ function hideBar() {
 const SHORTCUTS = [
   ['Alt+Shift+R', 'record'],
   ['Alt+Shift+P', 'pause'],
+  ['Alt+Shift+T', 'live'],
   ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => [`Alt+Shift+${n}`, `layout:${n - 1}`]),
 ];
 
@@ -424,6 +425,52 @@ function clipInputs(inputs, clip, fps, duration, nextIndex) {
   return { v, a: aPad, next: i };
 }
 
+// Tempo change without changing the pitch (atempo takes 0.5..100 per stage).
+function atempoChain(sp) {
+  const out = [];
+  let s = sp;
+  while (s < 0.5) { out.push('atempo=0.5'); s /= 0.5; }
+  out.push(`atempo=${s.toFixed(5)}`);
+  return out.join(',');
+}
+
+// Voice treatment applied before leveling: noise reduction, gate and a 3-band EQ.
+const DENOISE = [null, 'afftdn=nr=10:nf=-50:tn=1', 'afftdn=nr=16:nf=-44:tn=1', 'afftdn=nr=24:nf=-38:tn=1'];
+function audioPre(fx) {
+  const out = [];
+  const dn = DENOISE[Math.max(0, Math.min(3, fx.denoise | 0))];
+  if (dn) out.push('highpass=f=80', dn);
+  if (fx.gate) out.push('agate=threshold=0.02:ratio=3:attack=5:release=180:range=0.12');
+  const g = (v) => Math.max(-15, Math.min(15, Number(v) || 0)).toFixed(1);
+  if (Number(fx.bass)) out.push(`bass=g=${g(fx.bass)}:f=110:w=0.7`);
+  if (Number(fx.mid)) out.push(`equalizer=f=1200:t=q:w=0.9:g=${g(fx.mid)}`);
+  if (Number(fx.treble)) out.push(`treble=g=${g(fx.treble)}:f=6000:w=0.6`);
+  return out.length ? `,${out.join(',')}` : '';
+}
+
+const AUDIO_FX_DEFAULT = { master: 1, mic: 1, sys: 1, media: 1, bass: 0, mid: 0, treble: 0, denoise: 0, gate: false };
+
+// The lesson's audio source: the recorded mix, or (when the separate microphone
+// and computer-audio files exist and their volumes were changed) a new mix.
+// Adds inputs/lines and returns the pad label to read from.
+function lessonAudio({ inputs, lines, next, job, afx, hasAudio }) {
+  const side = job.sidecars;
+  const useSide = side && side.mic && side.sys && fs.existsSync(side.mic) && fs.existsSync(side.sys)
+    && (Math.abs(afx.mic - 1) > 0.001 || Math.abs(afx.sys - 1) > 0.001);
+  if (useSide) {
+    inputs.push('-i', side.mic, '-i', side.sys);
+    lines.push(`[${next}:a]${AUDIO_IN},volume=${afx.mic.toFixed(3)}[smic]`);
+    lines.push(`[${next + 1}:a]${AUDIO_IN},volume=${afx.sys.toFixed(3)}[ssys]`);
+    lines.push('[smic][ssys]amix=inputs=2:normalize=0:duration=longest[srcA]');
+    return { label: 'srcA', next: next + 2, vol: '' };
+  }
+  if (!hasAudio) {
+    inputs.push('-f', 'lavfi', '-t', String(job.duration), '-i', 'anullsrc=r=48000:cl=stereo');
+    return { label: `${next}:a`, next: next + 1, vol: '' };
+  }
+  return { label: '0:a', next, vol: Math.abs(afx.mic - 1) > 0.001 ? `,volume=${afx.mic.toFixed(3)}` : '' };
+}
+
 async function runExport(job) {
   const fps = job.fps || 30;
   const crf = job.crf || 26;
@@ -431,50 +478,59 @@ async function runExport(job) {
   const H = job.height || 1080;
   const ns = Math.round(48000 / fps);
   const half = 0.5 / fps;
+  const audioOnly = job.audioOnly || null;
   const trans = job.transition || null;
-  // seq: lesson pieces ({t:'s', a, b} in source seconds) and transitions ({t:'x'}), in output order.
+  const post = job.post || {};
+  const afx = { ...AUDIO_FX_DEFAULT, ...(job.audioFx || {}) };
+  for (const k of ['master', 'mic', 'sys', 'media']) afx[k] = Math.max(0, Math.min(4, Number(afx[k]) || 0));
+  // seq: lesson pieces ({t:'s', a, b, sp} in source seconds, sp = speed) and transitions ({t:'x'}), in output order.
   let seq = job.seq && job.seq.length ? job.seq : [{ t: 's', a: 0, b: job.duration }];
   if (!trans) seq = seq.filter((it) => it.t === 's');
   seq = seq.filter((it) => it.t === 'x' || it.b - it.a >= 1 / fps);
+  const spOf = (it) => (Number(it.sp) > 0 ? Math.max(0.1, Math.min(16, Number(it.sp))) : 1);
   const segs = seq.filter((it) => it.t === 's');
   if (!segs.length) throw new Error('Não sobrou nenhum trecho para exportar.');
-  const keptDur = segs.reduce((sum, it) => sum + (it.b - it.a), 0);
+  const keptSrc = segs.reduce((sum, it) => sum + (it.b - it.a), 0);
+  const keptDur = segs.reduce((sum, it) => sum + (it.b - it.a) / spOf(it), 0);
   const transDur = trans ? Math.min(3, trans.duration) : 0;
   const nTrans = seq.length - segs.length;
-  const intro = job.intro || null;
+  const intro = audioOnly ? null : (job.intro || null);
   const introDur = intro ? intro.duration : 0;
   const total = introDur + keptDur + nTrans * transDur;
   const level = job.level !== false;
-  const tracks = (job.tracks || []).filter((t) => t.source && fs.existsSync(t.source));
+  const tracks = audioOnly ? [] : (job.tracks || []).filter((t) => t.source && fs.existsSync(t.source));
   // Lip sync: cameras deliver frames late, so the audio is delayed to match.
   const delayMs = Math.round(job.audioDelay || 0);
   // Cuts are in audio time (what the waveform shows), so no syllable is lost;
   // the camera delivers frames late, so the video is read that much ahead.
   const vOff = delayMs / 1000;
+  const overlays = (post.overlays || []).filter((o) => o.o1 > o.o0);
 
   // Progress is reported per phase and as one overall number.
   const weights = [];
-  if (level && job.hasAudio !== false) weights.push(['audio', 0.08 * keptDur]);
-  weights.push(['video', total]);
+  if (level && job.hasAudio !== false) weights.push(['audio', 0.08 * keptSrc]);
+  weights.push(['video', audioOnly ? total * 0.15 : total]);
   for (const t of tracks) weights.push([t.key, (t.key === 'screen' ? 0.8 : 0.5) * keptDur]);
   const sum = weights.reduce((acc, [, w]) => acc + w, 0) || 1;
   const send = (phase, pct) => {
+    if (job.quiet) return;
     let done = 0;
     for (const [name, w] of weights) {
       if (name === phase) { done += w * pct; break; }
       done += w;
     }
-    sendMain('export:progress', { phase, pct, overall: Math.min(1, done / sum) });
+    sendMain('export:progress', { phase: audioOnly && phase === 'video' ? 'audioOnly' : phase, pct, overall: Math.min(1, done / sum) });
   };
 
   exportCancelled = false;
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'gravador-'));
-  const outPath = job.output;
-  const partial = outPath.replace(/\.mp4$/i, ' (exportando).mp4');
+  const outPath = audioOnly ? audioOnly.output : job.output;
+  const partial = outPath.replace(/(\.[a-z0-9]+)$/i, ' (exportando)$1');
   const partials = [partial];
 
   try {
     const hasAudio = job.hasAudio !== false;
+    const pre = audioPre(afx);
     const sel = selectExpr(segs.map((it) => [it.a, it.b]), fps);
     const aSel = `asetnsamples=n=${ns}:p=0,aselect='${sel}',asetpts=N/SR/TB`;
 
@@ -487,10 +543,14 @@ async function runExport(job) {
     if (level && hasAudio) {
       const measure = async (chain, from, to) => {
         const f = path.join(tmp, 'measure.txt');
-        await fsp.writeFile(f, `[0:a]${AUDIO_IN},${aSel},${chain},ebur128=framelog=quiet[a]`);
+        const mInputs = ['-i', job.source];
+        const mLines = [];
+        const src = lessonAudio({ inputs: mInputs, lines: mLines, next: 1, job, afx, hasAudio });
+        mLines.push(`[${src.label}]${AUDIO_IN}${src.vol}${pre},${aSel},${chain},ebur128=framelog=quiet[a]`);
+        await fsp.writeFile(f, mLines.join(';\n'));
         const out = await ffmpegRun(
-          ['-hide_banner', '-nostats', '-progress', 'pipe:1', '-i', job.source, '-filter_complex_script', f, '-map', '[a]', '-f', 'null', '-'],
-          { total: keptDur, onProgress: (pct) => send('audio', from + pct * (to - from)) },
+          ['-hide_banner', '-nostats', '-progress', 'pipe:1', ...mInputs, '-filter_complex_script', f, '-map', '[a]', '-f', 'null', '-'],
+          { total: keptSrc, onProgress: (pct) => send('audio', from + pct * (to - from)) },
         );
         const m = [...out.matchAll(/I:\s+(-?[\d.]+) LUFS/g)].pop();
         return m ? Number(m[1]) : NaN;
@@ -520,21 +580,26 @@ async function runExport(job) {
 
     // Lesson pieces of one input: every kept span is trimmed on the frame grid
     // (video) and to the sample (audio), so cuts are exact and never drift.
-    const pieces = (vIn, aIn, p, vFilter) => {
+    // A piece with a speed other than 1x is retimed (picture) and time-stretched
+    // without changing the pitch (sound), both to exactly the same length.
+    const pieces = (vIn, aIn, p, vFilter, aPre = '') => {
       const n = segs.length;
       const vl = segs.map((_, i) => `[${p}v${i}]`).join('');
       const al = segs.map((_, i) => `[${p}a${i}]`).join('');
-      const lines = [
-        `[${vIn}]fps=${fps}${n > 1 ? `,split=${n}` : ''}${vl}`,
-        `[${aIn}]${AUDIO_IN}${n > 1 ? `,asplit=${n}` : ''}${al}`,
-      ];
+      const lines = [];
+      if (vIn) lines.push(`[${vIn}]fps=${fps}${n > 1 ? `,split=${n}` : ''}${vl}`);
+      lines.push(`[${aIn}]${AUDIO_IN}${aPre}${n > 1 ? `,asplit=${n}` : ''}${al}`);
       segs.forEach((it, i) => {
         const len = it.b - it.a;
+        const sp = spOf(it);
         const va = Math.max(0, it.a + vOff - half);
-        lines.push(`[${p}v${i}]trim=start=${va.toFixed(4)}:end=${(va + len).toFixed(4)},setpts=PTS-STARTPTS,${vFilter}[${p}sv${i}]`);
+        const nF = Math.max(1, Math.round((len / sp) * fps));
+        const vSp = sp !== 1 ? `,setpts=PTS/${sp.toFixed(5)},fps=${fps},tpad=stop_mode=clone:stop=${Math.ceil(fps)},trim=end_frame=${nF},setpts=PTS-STARTPTS` : '';
+        if (vIn) lines.push(`[${p}v${i}]trim=start=${va.toFixed(4)}:end=${(va + len).toFixed(4)},setpts=PTS-STARTPTS${vSp},${vFilter}[${p}sv${i}]`);
         // 6 ms micro-fades at each seam: no clicks, inaudible otherwise.
         const fades = n > 1 && len > 0.05 ? `,afade=t=in:d=0.006,afade=t=out:st=${(len - 0.006).toFixed(4)}:d=0.006` : '';
-        lines.push(`[${p}a${i}]atrim=start=${it.a.toFixed(4)}:end=${it.b.toFixed(4)},asetpts=PTS-STARTPTS${fades}${lev}[${p}sa${i}]`);
+        const aSp = sp !== 1 ? `,${atempoChain(sp)},${AUDIO_IN},apad=whole_len=${nF * ns},atrim=end_sample=${nF * ns}` : '';
+        lines.push(`[${p}a${i}]atrim=start=${it.a.toFixed(4)}:end=${it.b.toFixed(4)},asetpts=PTS-STARTPTS${fades}${lev}${aSp}[${p}sa${i}]`);
       });
       return lines;
     };
@@ -542,14 +607,10 @@ async function runExport(job) {
     // ---- pass 2: final video = intro + pieces + transitions, leveled and compressed
     const FIT = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`;
     const inputs = ['-i', job.source];
-    let next = 1;
-    let mainA = '0:a';
-    if (!hasAudio) {
-      inputs.push('-f', 'lavfi', '-t', String(job.duration), '-i', 'anullsrc=r=48000:cl=stereo');
-      mainA = `${next}:a`;
-      next += 1;
-    }
-    const graph = pieces('0:v', mainA, 'm', `${FIT},format=yuv420p`);
+    const graph = [];
+    const src = lessonAudio({ inputs, lines: graph, next: 1, job, afx, hasAudio });
+    let next = src.next;
+    graph.push(...pieces(audioOnly ? null : '0:v', src.label, 'm', `${FIT},format=yuv420p`, `${src.vol}${pre}`));
     const order = [];
     if (intro) {
       const c = clipInputs(inputs, intro, fps, intro.duration, next);
@@ -565,31 +626,113 @@ async function runExport(job) {
       const D = transDur.toFixed(3);
       const tv = Array.from({ length: nTrans }, (_, j) => `[tv${j}]`).join('');
       const ta = Array.from({ length: nTrans }, (_, j) => `[ta${j}]`).join('');
-      graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS${nTrans > 1 ? `,split=${nTrans}` : ''}${tv}`);
+      if (!audioOnly) graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS${nTrans > 1 ? `,split=${nTrans}` : ''}${tv}`);
       graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${trans.hasAudio ? clipLevel(transGain) : ''}${nTrans > 1 ? `,asplit=${nTrans}` : ''}${ta}`);
     }
     let si = 0;
     let ti = 0;
     for (const it of seq) {
-      if (it.t === 's') { order.push(`[msv${si}][msa${si}]`); si += 1; } else { order.push(`[tv${ti}][ta${ti}]`); ti += 1; }
+      if (it.t === 's') { order.push(audioOnly ? `[msa${si}]` : `[msv${si}][msa${si}]`); si += 1; } else { order.push(audioOnly ? `[ta${ti}]` : `[tv${ti}][ta${ti}]`); ti += 1; }
     }
-    graph.push(`${order.join('')}concat=n=${order.length}:v=1:a=1[v][a]`);
+    graph.push(audioOnly
+      ? `${order.join('')}concat=n=${order.length}:v=0:a=1[a]`
+      : `${order.join('')}concat=n=${order.length}:v=1:a=1[v][a]`);
+
+    // ---- post: zoom + color filters on the picture, then texts/images/videos on top
+    let vCur = 'v';
+    if (!audioOnly && post.vf) {
+      graph.push(`[v]${post.vf}[vfx]`);
+      vCur = 'vfx';
+    }
+    const extraAudio = [];
+    let ovN = 0;
+    for (const o of overlays) {
+      const A = o.o0;
+      const B = o.o1;
+      const D = B - A;
+      const anim = o.anim || {};
+      const AD = Math.max(0.05, Math.min(3, anim.d || 0.35, D / 2));
+      if (o.kind === 'video' && o.video && fs.existsSync(o.video.path)) {
+        const vid = o.video;
+        const idx = next;
+        if (/\.gif$/i.test(vid.path)) inputs.push('-ignore_loop', '0', '-t', D.toFixed(3), '-i', vid.path); // GIFs loop
+        else inputs.push('-ss', String(Math.max(0, vid.trim || 0)), '-t', D.toFixed(3), '-i', vid.path);
+        next += 1;
+        if (vid.hasAudio && (vid.volume ?? 1) > 0.001) {
+          const vol = (vid.volume ?? 1) * afx.media;
+          const ms = Math.round(A * 1000);
+          extraAudio.push(`[${idx}:a]${AUDIO_IN},volume=${vol.toFixed(3)},afade=t=in:d=0.05,afade=t=out:st=${Math.max(0, D - 0.08).toFixed(3)}:d=0.08,adelay=delays=${ms}:all=1[oa${ovN}]`);
+        }
+        if (audioOnly) { ovN += 1; continue; }
+        let chain = `[${idx}:v]fps=${fps},scale=${o.w}:${o.h},setsar=1,format=rgba`;
+        if (o.mask) {
+          const mf = path.join(tmp, `mask${ovN}.png`);
+          await fsp.writeFile(mf, Buffer.from(o.mask.split(',')[1], 'base64'));
+          inputs.push('-loop', '1', '-framerate', String(fps), '-t', D.toFixed(3), '-i', mf);
+          graph.push(`[${next}:v]format=gray,scale=${o.w}:${o.h}[mk${ovN}]`);
+          graph.push(`${chain}[vv${ovN}]`);
+          chain = `[vv${ovN}][mk${ovN}]alphamerge`;
+          next += 1;
+        }
+        graph.push(overlayChain(chain, o, AD, D, fps, `ov${ovN}`));
+        graph.push(overlayOn(vCur, `ov${ovN}`, o, AD, W, H, `vo${ovN}`));
+        vCur = `vo${ovN}`;
+        ovN += 1;
+        continue;
+      }
+      if (audioOnly || !o.png) continue;
+      const pf = path.join(tmp, `ov${ovN}.png`);
+      await fsp.writeFile(pf, Buffer.from(o.png.split(',')[1], 'base64'));
+      inputs.push('-loop', '1', '-framerate', String(fps), '-t', D.toFixed(3), '-i', pf);
+      graph.push(overlayChain(`[${next}:v]format=rgba`, o, AD, D, fps, `ov${ovN}`));
+      next += 1;
+      graph.push(overlayOn(vCur, `ov${ovN}`, o, AD, W, H, `vo${ovN}`));
+      vCur = `vo${ovN}`;
+      ovN += 1;
+    }
+    // Master volume (after leveling), inserted media audio mixed in.
+    let aCur = 'a';
+    if (extraAudio.length) {
+      graph.push(...extraAudio);
+      const labels = extraAudio.map((l) => l.slice(l.lastIndexOf('[')));
+      graph.push(`[a]${labels.join('')}amix=inputs=${labels.length + 1}:normalize=0:duration=first:dropout_transition=0[amx]`);
+      aCur = 'amx';
+    }
+    if (Math.abs(afx.master - 1) > 0.001 || extraAudio.length) {
+      graph.push(`[${aCur}]volume=${afx.master.toFixed(3)},${LIMITER}[am]`);
+      aCur = 'am';
+    }
     const f2 = path.join(tmp, 'export.txt');
     await fsp.writeFile(f2, graph.join(';\n'));
 
     send('video', 0);
+    if (audioOnly) {
+      const fmt = audioOnly.format;
+      const codec = fmt === 'wav' ? ['-c:a', 'pcm_s16le'] : fmt === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', '192k'] : ['-c:a', 'aac', '-b:a', '160k'];
+      await ffmpegRun([
+        '-hide_banner', '-nostats', '-y', '-progress', 'pipe:1',
+        ...inputs,
+        '-filter_complex_script', f2,
+        '-map', `[${aCur}]`, '-vn',
+        ...codec, '-ac', job.stereo ? '2' : '1', '-ar', '48000',
+        partial,
+      ], { total: total - introDur, onProgress: (pct) => send('video', pct) });
+      await fsp.rm(outPath, { force: true }).catch(() => {});
+      await fsp.rename(partial, outPath);
+      return { path: outPath, url: pathToFileURL(outPath).href, size: (await fsp.stat(outPath)).size, duration: total };
+    }
     await ffmpegRun([
       '-hide_banner', '-nostats', '-y', '-progress', 'pipe:1',
       ...inputs,
       '-filter_complex_script', f2,
-      '-map', '[v]', '-map', '[a]',
+      '-map', `[${vCur}]`, '-map', `[${aCur}]`,
       ...videoArgs('slow', crf),
       ...audioArgs,
       '-movflags', '+faststart',
       partial,
     ], { total, onProgress: (pct) => send('video', pct) });
 
-    // ---- separate camera / screen files: same cuts and audio, no intro or transitions
+    // ---- separate camera / screen files: same cuts, speed and audio, no intro, transitions or effects
     const trackOut = [];
     for (const t of tracks) {
       const tp = t.output.replace(/\.mp4$/i, ' (exportando).mp4');
@@ -597,13 +740,16 @@ async function runExport(job) {
       const ft = path.join(tmp, `${t.key}.txt`);
       const c = t.key === 'screen' && job.screenCrop;
       const cropF = c ? `crop=trunc(iw*${c.w.toFixed(4)}/2)*2:trunc(ih*${c.h.toFixed(4)}/2)*2:iw*${c.x.toFixed(4)}:ih*${c.y.toFixed(4)},` : '';
-      const tg = pieces('0:v', '0:a', 't', `${cropF}scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p`);
+      const tInputs = ['-i', t.source];
+      const tg = [];
+      const ts = lessonAudio({ inputs: tInputs, lines: tg, next: 1, job, afx, hasAudio: true });
+      tg.push(...pieces('0:v', ts.label, 't', `${cropF}scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p`, `${ts.vol}${pre}`));
       tg.push(`${segs.map((_, i) => `[tsv${i}][tsa${i}]`).join('')}concat=n=${segs.length}:v=1:a=1[v][a]`);
       await fsp.writeFile(ft, tg.join(';\n'));
       send(t.key, 0);
       await ffmpegRun([
         '-hide_banner', '-nostats', '-y', '-progress', 'pipe:1',
-        '-i', t.source,
+        ...tInputs,
         '-filter_complex_script', ft,
         '-map', '[v]', '-map', '[a]',
         ...videoArgs('medium', Math.max(16, crf - 2)),
@@ -637,6 +783,7 @@ async function runExport(job) {
         audioDelay: delayMs,
         finalDuration: total,
         introApplied: !!intro || !!job.introApplied,
+        ...(job.edits || {}),
       };
       if (job.trashOriginals && fs.existsSync(originalsDir) && job.source.startsWith(originalsDir)) {
         await shell.trashItem(originalsDir).then(() => { sourceTrashed = true; }).catch(() => {});
@@ -655,6 +802,39 @@ async function runExport(job) {
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+// One overlay's stream: opacity, fade in/out (alpha) and its start time on the final video.
+function overlayChain(head, o, AD, D, fps, label) {
+  const anim = o.anim || {};
+  const parts = [head];
+  if ((o.opacity ?? 1) < 0.999) parts.push(`colorchannelmixer=aa=${Math.max(0, o.opacity).toFixed(3)}`);
+  if (anim.in && anim.in !== 'none') parts.push(`fade=t=in:st=0:d=${AD.toFixed(3)}:alpha=1`);
+  if (anim.out && anim.out !== 'none') parts.push(`fade=t=out:st=${Math.max(0, D - AD).toFixed(3)}:d=${AD.toFixed(3)}:alpha=1`);
+  parts.push(`setpts=PTS-STARTPTS+${o.o0.toFixed(4)}/TB`);
+  return `${parts.join(',')}[${label}]`;
+}
+
+// Places an overlay; slide animations move it with the same easing as the preview.
+function overlayOn(base, label, o, AD, W, H, out) {
+  const anim = o.anim || {};
+  const A = o.o0.toFixed(4);
+  const B = o.o1.toFixed(4);
+  const D = AD.toFixed(4);
+  const pin = `pow(1-clip((t-${A})/${D},0,1),2)`;
+  const pout = `pow(1-clip((${B}-t)/${D},0,1),2)`;
+  const SL = 0.045;
+  const xs = [String(o.x)];
+  const ys = [String(o.y)];
+  const add = (kind, p, sign) => {
+    if (kind === 'up') ys.push(`${(SL * H * sign).toFixed(2)}*${p}`);
+    else if (kind === 'down') ys.push(`${(-SL * H * sign).toFixed(2)}*${p}`);
+    else if (kind === 'left') xs.push(`${(SL * W * sign).toFixed(2)}*${p}`);
+    else if (kind === 'right') xs.push(`${(-SL * W * sign).toFixed(2)}*${p}`);
+  };
+  add(anim.in, pin, 1);
+  add(anim.out, pout, -1);
+  return `[${base}][${label}]overlay=x='${xs.join('+')}':y='${ys.join('+')}':eof_action=pass:enable='between(t,${A},${B})'[${out}]`;
 }
 
 // ---------------------------------------------------------------- gallery
@@ -709,6 +889,11 @@ async function galleryItemFromFolder(folder) {
       screenCrop: proj.screenCrop || null,
       inserts: fromOriginals ? (proj.inserts || []) : [],
       audioDelay: fromOriginals ? proj.audioDelay : 0,
+      // Effects, texts, zooms and scenes stay editable while the originals exist;
+      // once only the final file is left they are part of the picture.
+      ...(fromOriginals ? Object.fromEntries(EDIT_KEYS.map((k) => [k, proj[k]])) : {}),
+      sidecars: fromOriginals && proj.sidecars && exists(abs(proj.sidecars.mic)) && exists(abs(proj.sidecars.sys))
+        ? { mic: abs(proj.sidecars.mic), sys: abs(proj.sidecars.sys) } : null,
       finalPath: fromOriginals ? path.join(folder, `${title}.mp4`) : main,
       tracks: fromOriginals
         ? ['camera', 'screen'].filter((k) => exists(originalsAbs[k])).map((k) => ({
@@ -857,6 +1042,149 @@ const STD_H = [720, 768, 800, 864, 900, 960, 1024, 1050, 1080, 1152, 1200, 1280,
 function snapRes(v, list) {
   const near = list.find((c) => Math.abs(c - v) <= 3);
   return near || v;
+}
+
+// ---------------------------------------------------------------- scenes (continue a recording)
+
+// Editor state kept in projeto.json (besides removed/inserts/audioDelay/title).
+const EDIT_KEYS = ['speeds', 'speed', 'zooms', 'overlays', 'fx', 'fxGlobal', 'audioFx', 'scenes'];
+
+// Joins recordings end to end without re-encoding (they come from the same
+// recorder settings); falls back to one re-encode if the copy is refused.
+async function concatVideos(files, out) {
+  const list = `${out}.lista.txt`;
+  await fsp.writeFile(list, files.map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
+  try {
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', out]);
+  } catch {
+    const inputs = files.flatMap((f) => ['-i', f]);
+    const g = files.map((_, i) => `[${i}:v]setsar=1[v${i}];[${i}:a]${AUDIO_IN}[a${i}]`).join(';')
+      + `;${files.map((_, i) => `[v${i}][a${i}]`).join('')}concat=n=${files.length}:v=1:a=1[v][a]`;
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', ...inputs, '-filter_complex', g, '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out]);
+  } finally {
+    await fsp.rm(list, { force: true }).catch(() => {});
+  }
+}
+
+// Audio parts back to back, each padded/trimmed to its exact duration (null = silence).
+async function concatAudio(parts, out) {
+  const inputs = [];
+  const lines = [];
+  parts.forEach((p, i) => {
+    if (p.file) inputs.push('-i', p.file);
+    else inputs.push('-f', 'lavfi', '-t', p.dur.toFixed(3), '-i', 'anullsrc=r=48000:cl=stereo');
+    lines.push(`[${i}:a]${AUDIO_IN},apad,atrim=duration=${p.dur.toFixed(4)},asetpts=PTS-STARTPTS[a${i}]`);
+  });
+  lines.push(`${parts.map((_, i) => `[a${i}]`).join('')}concat=n=${parts.length}:v=0:a=1[a]`);
+  await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', ...inputs, '-filter_complex', lines.join(';'), '-map', '[a]', '-c:a', 'aac', '-b:a', '160k', out]);
+}
+
+async function appendScene(folder, done, meta, warnings) {
+  const proj = (await readProject(folder)) || {};
+  const abs = (rel) => (rel ? path.join(folder, rel) : null);
+  const rel = (f) => (f ? path.relative(folder, f) : null);
+  const exists = (f) => f && fs.existsSync(f);
+  const odir = path.join(folder, 'originais');
+  const oldMain = abs(proj.originals && proj.originals.main);
+  const oldDur = (await probe(oldMain)).duration || proj.duration || 0;
+  const newDur = (await probe(done.main)).duration || 0;
+  const scenes = Array.isArray(proj.scenes) && proj.scenes.length ? proj.scenes : [{ id: 's1', name: 'Cena 1', start: 0, end: oldDur }];
+  const originals = { ...(proj.originals || {}) };
+
+  // Separate microphone / computer audio: a scene without them uses its mix as
+  // the microphone and silence as the computer audio.
+  let sidecars = null;
+  const oldSide = proj.sidecars && exists(abs(proj.sidecars.mic)) && exists(abs(proj.sidecars.sys)) ? proj.sidecars : null;
+  const newSide = exists(done.mic) && exists(done.sys);
+  if (oldSide || newSide) {
+    sidecars = {};
+    for (const k of ['mic', 'sys']) {
+      const out = path.join(odir, `${k === 'mic' ? 'microfone' : 'sistema'} (unindo).m4a`);
+      await concatAudio([
+        { file: oldSide ? abs(oldSide[k]) : (k === 'mic' ? oldMain : null), dur: oldDur },
+        { file: newSide ? done[k] : (k === 'mic' ? done.main : null), dur: newDur },
+      ], out);
+      const target = path.join(odir, `${k === 'mic' ? 'microfone' : 'sistema'}.m4a`);
+      await fsp.rm(target, { force: true });
+      await fsp.rename(out, target);
+      sidecars[k] = rel(target);
+    }
+  }
+  for (const k of ['mic', 'sys']) if (exists(done[k])) await fsp.rm(done[k], { force: true });
+
+  // Picture (+ the mixed audio) and the separate camera/screen files.
+  const joinInto = async (oldFile, newFile, name) => {
+    const tmpOut = path.join(odir, `${name} (unindo).mp4`);
+    await concatVideos([oldFile, newFile], tmpOut);
+    const target = path.join(odir, `${name}.mp4`);
+    await fsp.rm(oldFile, { force: true });
+    await fsp.rm(newFile, { force: true });
+    await fsp.rm(target, { force: true });
+    await fsp.rename(tmpOut, target);
+    createdFiles.add(target);
+    return target;
+  };
+  const mainOut = await joinInto(oldMain, done.main, 'final');
+  originals.main = rel(mainOut);
+  for (const k of ['camera', 'screen']) {
+    const oldF = abs(originals[k]);
+    if (exists(oldF) && exists(done[k])) {
+      originals[k] = rel(await joinInto(oldF, done[k], k === 'camera' ? 'camera' : 'tela'));
+    } else if (exists(oldF)) {
+      await shell.trashItem(oldF).catch(() => fsp.rm(oldF, { force: true }));
+      originals[k] = null;
+      warnings.push(`A nova cena foi gravada sem o arquivo separado da ${TRACK_LABEL[k]}; esse arquivo separado foi descartado para não ficar incompleto.`);
+    } else if (exists(done[k])) {
+      await fsp.rm(done[k], { force: true });
+    }
+  }
+
+  const info = await probe(mainOut);
+  const n = scenes.length + 1;
+  const ids = new Set(scenes.map((s) => s.id));
+  let id = `s${n}`;
+  for (let i = n; ids.has(id); i += 1) id = `s${i + 1}`;
+  const nextScenes = [...scenes, { id, name: `Cena ${n}`, start: oldDur, end: info.duration || oldDur + newDur }];
+
+  let cursor = null;
+  try { cursor = JSON.parse(await fsp.readFile(path.join(odir, 'cursor.json'), 'utf8')); } catch { /* none yet */ }
+  if (Array.isArray(meta.cursor) && meta.cursor.length) {
+    cursor = [...(cursor || []), ...meta.cursor.map(([t, x, y]) => [Number((t + oldDur).toFixed(3)), x, y])];
+  }
+  if (cursor) await fsp.writeFile(path.join(odir, 'cursor.json'), JSON.stringify(cursor)).catch(() => {});
+
+  const saved = await writeProject(folder, {
+    originals,
+    sidecars,
+    scenes: nextScenes,
+    duration: info.duration,
+    hasAudio: info.hasAudio,
+    stereo: !!proj.stereo || !!meta.stereo,
+  });
+  const title = saved.title || path.basename(folder);
+  const stat = await fsp.stat(mainOut);
+  return {
+    folder,
+    title,
+    path: mainOut,
+    url: `${pathToFileURL(mainOut).href}?v=${Date.now()}`,
+    size: stat.size,
+    duration: info.duration,
+    hasAudio: info.hasAudio,
+    finalPath: path.join(folder, `${title}.mp4`),
+    tracks: ['camera', 'screen'].filter((k) => exists(abs(originals[k]))).map((k) => ({
+      key: k, source: abs(originals[k]), output: path.join(folder, `${title} - ${TRACK_LABEL[k]}.mp4`),
+    })),
+    sidecars: sidecars ? { mic: abs(sidecars.mic), sys: abs(sidecars.sys) } : null,
+    removed: saved.removed || [],
+    inserts: saved.inserts || [],
+    audioDelay: saved.audioDelay,
+    ...Object.fromEntries(EDIT_KEYS.map((k) => [k, saved[k]])),
+    scenes: nextScenes,
+    newScene: id,
+    warning: warnings[0] || null,
+  };
 }
 
 // ---------------------------------------------------------------- IPC
@@ -1129,17 +1457,9 @@ function registerIpc() {
   ipcMain.handle('shell:openPath', (_e, p) => shell.openPath(p));
 
   // --- recording file lifecycle
-  ipcMain.handle('rec:prepare', async (_e, { outDir, ext, tracks = [] }) => {
+  ipcMain.handle('rec:prepare', async (_e, { outDir, ext, tracks = [], sidecars = [], append = null }) => {
     const dir = outDir || defaultOutDir();
     await fsp.mkdir(dir, { recursive: true });
-    let base = timestampName();
-    let i = 2;
-    while (fs.existsSync(path.join(dir, base))) {
-      base = `${timestampName()} (${i})`;
-      i += 1;
-    }
-    // Every recording gets its own folder; the raw takes live in "originais"
-    // until the final video is exported.
     let freeGB = null;
     try {
       const fsInfo = await fsp.statfs(dir);
@@ -1148,19 +1468,52 @@ function registerIpc() {
     if (freeGB != null && freeGB < 1.5) {
       throw new Error(`Pouco espaço em disco: só ${freeGB.toFixed(1).replace('.', ',')} GB livres na pasta dos vídeos.`);
     }
-    const folder = path.join(dir, base);
+    let folder;
+    let base;
+    let prefix = '';
+    if (append) {
+      // A new scene for an existing lesson: recorded next to its originals and
+      // joined to them when it ends.
+      const proj = await readProject(append);
+      if (!proj || !proj.originals || !proj.originals.main || !fs.existsSync(path.join(append, proj.originals.main))) {
+        throw new Error('Os arquivos originais desta aula não existem mais: não dá para gravar uma nova cena.');
+      }
+      folder = append;
+      base = proj.title || path.basename(append);
+      prefix = `cena ${((proj.scenes || []).length || 1) + 1} - `;
+    } else {
+      base = timestampName();
+      let i = 2;
+      while (fs.existsSync(path.join(dir, base))) {
+        base = `${timestampName()} (${i})`;
+        i += 1;
+      }
+      // Every recording gets its own folder; the raw takes live in "originais"
+      // until the final video is exported.
+      folder = path.join(dir, base);
+    }
     const originalsDir = path.join(folder, 'originais');
     await fsp.mkdir(originalsDir, { recursive: true });
     const streams = {};
-    for (const key of ['main', ...tracks]) {
-      const name = key === 'main' ? 'final' : (key === 'camera' ? 'camera' : 'tela');
-      const tempPath = path.join(originalsDir, `${name} (gravando)${ext}`);
+    const NAMES = { main: 'final', camera: 'camera', screen: 'tela', mic: 'microfone', sys: 'sistema' };
+    for (const key of ['main', ...tracks, ...sidecars]) {
+      const name = `${prefix}${NAMES[key] || key}`;
+      const isSide = key === 'mic' || key === 'sys';
+      const tempPath = path.join(originalsDir, `${name} (gravando)${isSide ? '.webm' : ext}`);
       const ws = fs.createWriteStream(tempPath);
       ws.on('error', (err) => sendMain('rec:error', err.message));
-      streams[key] = { tempPath, path: path.join(originalsDir, `${name}.mp4`), ws };
+      streams[key] = { tempPath, path: path.join(originalsDir, `${name}${isSide ? '.m4a' : '.mp4'}`), ws, isSide };
     }
-    rec = { folder, originalsDir, base, streams };
+    rec = { folder, originalsDir, base, streams, append: !!append };
     return { folder, base, freeGB };
+  });
+
+  // Where the mouse is on a screen (fractions of that display), for "zoom that follows the mouse".
+  ipcMain.handle('cursor:get', (_e, displayId) => {
+    const p = screen.getCursorScreenPoint();
+    const d = screen.getAllDisplays().find((x) => String(x.id) === String(displayId)) || screen.getDisplayNearestPoint(p);
+    const b = d.bounds;
+    return { x: (p.x - b.x) / b.width, y: (p.y - b.y) / b.height };
   });
 
   ipcMain.handle('rec:chunk', (_e, key, buf) => {
@@ -1175,10 +1528,15 @@ function registerIpc() {
 
   ipcMain.handle('rec:discard', async () => {
     if (!rec) return true;
-    const { streams, folder } = rec;
+    const { streams, folder, append } = rec;
     rec = null;
     for (const s of Object.values(streams)) await closeStream(s.ws);
-    await fsp.rm(folder, { recursive: true, force: true });
+    if (append) {
+      // A new scene of an existing lesson: only the new takes go away.
+      for (const s of Object.values(streams)) await fsp.rm(s.tempPath, { force: true }).catch(() => {});
+    } else {
+      await fsp.rm(folder, { recursive: true, force: true });
+    }
     return true;
   });
 
@@ -1186,7 +1544,7 @@ function registerIpc() {
   // "originals" the editor works on. Nothing is re-encoded, so it is quick.
   ipcMain.handle('rec:finish', async (_e, { mime, meta = {} }) => {
     if (!rec) throw new Error('Nenhuma gravação ativa.');
-    const { streams, folder, base } = rec;
+    const { streams, folder, base, append } = rec;
     rec = null;
     const isH264 = /avc1|h264/i.test(mime);
     const isAac = /mp4a/i.test(mime);
@@ -1199,8 +1557,11 @@ function registerIpc() {
         continue;
       }
       const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', s.tempPath];
-      args.push(...(isH264 ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p']));
-      args.push(...(isAac ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']));
+      if (s.isSide) args.push('-vn', '-c:a', 'aac', '-b:a', '160k');
+      else {
+        args.push(...(isH264 ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p']));
+        args.push(...(isAac ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']));
+      }
       args.push('-movflags', '+faststart', s.path);
       try {
         await runFfmpeg(args);
@@ -1213,9 +1574,15 @@ function registerIpc() {
       createdFiles.add(done[key]);
     }
     if (!done.main) throw new Error('A gravação ficou vazia.');
+    if (append) return appendScene(folder, done, meta, warnings);
     const info = await probe(done.main);
     const rel = (f) => (f ? path.relative(folder, f) : null);
+    if (Array.isArray(meta.cursor) && meta.cursor.length) {
+      await fsp.writeFile(path.join(folder, 'originais', 'cursor.json'), JSON.stringify(meta.cursor)).catch(() => {});
+    }
     await writeProject(folder, {
+      sidecars: done.mic && done.sys ? { mic: rel(done.mic), sys: rel(done.sys) } : null,
+      scenes: [{ id: 's1', name: 'Cena 1', start: 0, end: info.duration }],
       version: 1,
       title: base,
       createdAt: new Date().toISOString(),
@@ -1244,8 +1611,18 @@ function registerIpc() {
       tracks: ['camera', 'screen'].filter((k) => done[k]).map((k) => ({
         key: k, source: done[k], output: path.join(folder, `${base} - ${TRACK_LABEL[k]}.mp4`),
       })),
+      scenes: [{ id: 's1', name: 'Cena 1', start: 0, end: info.duration }],
+      sidecars: done.mic && done.sys ? { mic: done.mic, sys: done.sys } : null,
       warning: warnings[0] || null,
     };
+  });
+
+  ipcMain.handle('project:cursor', async (_e, folder) => {
+    try {
+      return JSON.parse(await fsp.readFile(path.join(folder, 'originais', 'cursor.json'), 'utf8'));
+    } catch {
+      return null;
+    }
   });
 
   // --- gallery
@@ -1331,6 +1708,74 @@ function registerIpc() {
       // Transitions are short inserts: at most 3 s.
       duration: slot.startsWith('t') ? Math.min(3, info.isImage ? 2 : info.duration) : (info.isImage ? 3 : info.duration),
     };
+  });
+
+  // Images / videos placed over the lesson, and background images for the studio.
+  // A private copy is kept (inside the lesson folder when there is one) so the
+  // project still works if the original file is moved.
+  ipcMain.handle('dialog:media', async (_e, { purpose = 'overlay', folder = null } = {}) => {
+    const isBg = purpose === 'background';
+    const res = await dialog.showOpenDialog(mainWin, {
+      title: isBg ? 'Escolha uma imagem de fundo' : 'Escolha uma imagem, GIF ou vídeo para inserir',
+      properties: ['openFile'],
+      filters: [isBg
+        ? { name: 'Imagem', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }
+        : { name: 'Imagem ou vídeo', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'mp4', 'mov', 'webm', 'mkv', 'm4v'] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const src = res.filePaths[0];
+    const info = await probe(src);
+    if (!info.hasVideo) throw new Error('Esse arquivo não tem imagem.');
+    const isGif = /\.gif$/i.test(src);
+    const isImage = info.isImage || (isGif && info.duration <= 0.05);
+    if (isBg && !isImage) throw new Error('Escolha uma imagem (PNG, JPG ou WebP).');
+    const dir = isBg
+      ? path.join(app.getPath('userData'), 'fundos')
+      : (folder && fs.existsSync(path.join(folder, 'projeto.json')) ? path.join(folder, 'midia') : path.join(app.getPath('userData'), 'midia'));
+    await fsp.mkdir(dir, { recursive: true });
+    const ext = path.extname(src).toLowerCase();
+    const dest = uniquePath(dir, path.basename(src, path.extname(src)).slice(0, 60), ext);
+    await fsp.copyFile(src, dest);
+    return {
+      path: dest,
+      url: pathToFileURL(dest).href,
+      name: path.basename(src),
+      kind: isImage ? 'image' : 'video',
+      w: info.width,
+      h: info.height,
+      hasAudio: !isImage && info.hasAudio,
+      duration: isImage ? 0 : info.duration,
+    };
+  });
+
+  // Image bytes as a data URL: drawing it keeps the canvas exportable as PNG.
+  ipcMain.handle('media:dataUrl', async (_e, file) => {
+    const st = await fsp.stat(file);
+    if (st.size > 40e6) throw new Error('Imagem grande demais.');
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const mime = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', webp: 'webp', gif: 'gif', bmp: 'bmp' }[ext] || 'png';
+    return `data:image/${mime};base64,${(await fsp.readFile(file)).toString('base64')}`;
+  });
+
+  // "Baixar áudio editado": the lesson audio with every edit, as MP3, WAV or M4A.
+  ipcMain.handle('export:audio', async (_e, job) => {
+    const fmt = ['mp3', 'wav', 'm4a'].includes(job.format) ? job.format : 'mp3';
+    const res = await dialog.showSaveDialog(mainWin, {
+      title: 'Salvar o áudio editado',
+      defaultPath: path.join(job.folder || path.dirname(job.source), `${safeName(job.title || 'Aula') || 'Aula'} - áudio.${fmt}`),
+      filters: [{ name: fmt.toUpperCase(), extensions: [fmt] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    return runExport({ ...job, audioOnly: { format: fmt, output: res.filePath } });
+  });
+
+  // A few seconds of the treated audio, to listen before exporting.
+  ipcMain.handle('audio:preview', async (_e, job) => {
+    const dir = path.join(os.tmpdir(), 'gravador-previas');
+    await fsp.mkdir(dir, { recursive: true });
+    const out = path.join(dir, `audio-${Date.now()}.wav`);
+    const res = await runExport({ ...job, quiet: true, audioOnly: { format: 'wav', output: out } });
+    return res.url;
   });
 
   ipcMain.handle('dialog:openVideo', async (_e, defaultPath) => {
@@ -1441,10 +1886,10 @@ app.whenReady().then(async () => {
   // Old editor previews are only a cache.
   fsp.rm(path.join(os.tmpdir(), 'gravador-previas'), { recursive: true, force: true }).catch(() => {});
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
-    cb(['media', 'display-capture', 'clipboard-sanitized-write'].includes(permission));
+    cb(['media', 'display-capture', 'clipboard-sanitized-write', 'local-fonts'].includes(permission));
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => (
-    ['media', 'display-capture'].includes(permission)
+    ['media', 'display-capture', 'local-fonts'].includes(permission)
   ));
 
   await applyBundledDefaults();

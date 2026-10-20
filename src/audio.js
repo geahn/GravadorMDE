@@ -15,6 +15,13 @@ export class AudioMixer {
     this.sysGain = this.ctx.createGain();
     this.sysGain.connect(this.dest);
 
+    // The same two sources also kept apart (saved as separate files while
+    // recording with the computer audio), to balance them in the editor.
+    this.micDest = this.ctx.createMediaStreamDestination();
+    this.sysDest = this.ctx.createMediaStreamDestination();
+    this.micGain.connect(this.micDest);
+    this.sysGain.connect(this.sysDest);
+
     this.buf = new Float32Array(this.micAnalyser.fftSize);
     this.micSource = null;
     this.sysSource = null;
@@ -37,6 +44,18 @@ export class AudioMixer {
     this.sysSource = stream ? this.ctx.createMediaStreamSource(stream) : null;
     if (this.sysSource) this.sysSource.connect(this.sysGain);
     this.resume();
+  }
+
+  setSysGain(value) {
+    this.sysGain.gain.setTargetAtTime(value, this.ctx.currentTime, 0.02);
+  }
+
+  get micTrack() {
+    return this.micDest.stream.getAudioTracks()[0];
+  }
+
+  get sysTrack() {
+    return this.sysDest.stream.getAudioTracks()[0];
   }
 
   setMicGain(value) {

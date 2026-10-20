@@ -21,7 +21,11 @@ contextBridge.exposeInMainWorld('api', {
     url: (file) => ipcRenderer.invoke('media:url', file),
     previewVideo: (file) => ipcRenderer.invoke('media:previewVideo', file),
     proxyVideo: (file) => ipcRenderer.invoke('media:proxyVideo', file),
+    pick: (opts) => ipcRenderer.invoke('dialog:media', opts),
+    dataUrl: (file) => ipcRenderer.invoke('media:dataUrl', file),
   },
+  cursor: (displayId) => ipcRenderer.invoke('cursor:get', displayId),
+  projectCursor: (folder) => ipcRenderer.invoke('project:cursor', folder),
   gallery: {
     list: (dir) => ipcRenderer.invoke('gallery:list', dir),
     rename: (item, title) => ipcRenderer.invoke('gallery:rename', item, title),
@@ -53,6 +57,8 @@ contextBridge.exposeInMainWorld('api', {
   exporter: {
     run: (job) => ipcRenderer.invoke('export:run', job),
     cancel: () => ipcRenderer.invoke('export:cancel'),
+    audio: (job) => ipcRenderer.invoke('export:audio', job),
+    audioPreview: (job) => ipcRenderer.invoke('audio:preview', job),
     onProgress: on('export:progress'),
   },
 
