@@ -1361,3 +1361,22 @@ body.in-gallery .title-actions .divider { display: none; }
 .cam-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
 .cam-tools .seg button { padding: 0 10px; min-width: 0; font-variant-numeric: tabular-nums; }
 .cam-mirror { display: flex; align-items: center; gap: 8px; width: 100%; color: var(--text); cursor: pointer; }
+
+/* camera image controls (sources window) */
+.cam-adj { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
+.cam-adj summary { list-style: none; cursor: pointer; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; }
+.cam-adj summary::-webkit-details-marker { display: none; }
+.cam-adj summary span { font-size: 13px; font-weight: 600; color: var(--text); }
+.cam-adj summary small { font-size: 11.5px; color: var(--faint); }
+.cam-adj[open] summary { border-bottom: 1px solid var(--line); }
+#cam-adj-body { padding: 6px 12px 12px; }
+.cam-adj-row { padding: 6px 0; }
+.cam-adj-row.is-auto input[type=range] { opacity: .35; }
+.cam-adj-lab { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); margin-bottom: 2px; }
+.cam-adj-lab span { flex: 1; }
+.cam-adj-lab output { min-width: 56px; text-align: right; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.cam-adj-auto { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; cursor: pointer; }
+.cam-adj .seg button { font-size: 12px; padding: 0 8px; }
+.cam-adj-note { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; color: var(--faint); font-size: 12px; }
+.cam-adj-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11.5px; color: var(--faint); }
+.cam-adj-foot span { flex: 1; }

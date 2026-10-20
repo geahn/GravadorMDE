@@ -25,7 +25,8 @@
       "mde.js",
       "package.json",
       "preload.js",
-      "src/**/*"
+      "src/**/*",
+      "!native/**"
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
@@ -57,6 +58,13 @@
         "to": "defaults",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "native",
+        "to": "native",
+        "filter": [
+          "camctl.exe"
         ]
       }
     ]

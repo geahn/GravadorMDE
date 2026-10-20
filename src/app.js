@@ -60,6 +60,7 @@ const prefs = {
   mdeAuto: false, // send to the MDE lessons panel right after exporting
   mdeBaseUrl: '', // empty = default API address
   sysGain: 1, // volume of the computer audio while recording
+  camControls: {}, // per camera (by name): image controls set in "Ajustes de imagem da câmera"
   cameraFilter: null, // { name, p }: color filter applied live to the camera
   userTextStyles: [], // text styles saved by the user
   userFilters: [], // color filters saved by the user
@@ -899,6 +900,9 @@ async function setCamera(id) {
   renderLayers();
   editor.render();
   $('#cam-fx').hidden = !id;
+  $('#cam-adj').hidden = !id;
+  if (id && feeds.camera) reapplyCamControls();
+  if ($('#cam-adj').open) loadCamControls();
 }
 
 let micToken = 0;
@@ -1265,6 +1269,151 @@ function bindProps() {
       renderAll();
     } else if (b.dataset.act === 'deselect') {
       editor.select(null);
+    }
+  });
+}
+
+// ================================================================== camera image controls (UVC, any webcam)
+
+const CAM_PROC = [
+  ['Brightness', 'Brilho'], ['Contrast', 'Contraste'], ['Saturation', 'Saturação'], ['Hue', 'Matiz (hue)'],
+  ['Sharpness', 'Nitidez'], ['Gamma', 'Gama'], ['WhiteBalance', 'Balanço de branco'],
+  ['BacklightCompensation', 'Compensação'], ['Gain', 'Ganho (ISO)'],
+];
+const CAM_CAM = [['Exposure', 'Exposição'], ['Focus', 'Foco'], ['Zoom', 'Zoom']];
+const PLF = [[0, 'Desligado'], [1, '50 Hz'], [2, '60 Hz (Brasil)'], [3, 'Automático']];
+let camCtl = null; // last reading of the open camera
+let camCtlLabel = '';
+
+const camLabel = () => (cameras().find((c) => c.deviceId === S.cameraId) || {}).label || '';
+
+async function loadCamControls() {
+  const label = camLabel();
+  camCtlLabel = label;
+  const body = $('#cam-adj-body');
+  if (!label) { camCtl = null; body.innerHTML = ''; return; }
+  body.innerHTML = '<p class="cam-adj-note"><span class="spinner sm"></span> Lendo os ajustes da câmera…</p>';
+  const data = await api.camera.controls(label).catch(() => null);
+  if (label !== camCtlLabel) return;
+  camCtl = data;
+  renderCamControls();
+}
+
+function fmtCamValue(key, v, c = null) {
+  if (key === 'WhiteBalance') return `${v} K`;
+  // shown around the camera's default (OBSBOT: 0..18 with 9 = no compensation)
+  if (key === 'BacklightCompensation' && c) { const d = v - c.def; return d > 0 ? `+${d}` : String(d); }
+  if (key === 'Exposure') return v >= 0 ? `${2 ** v} s` : `1/${Math.round(2 ** -v)} s`;
+  return String(v);
+}
+
+function renderCamControls() {
+  const body = $('#cam-adj-body');
+  const d = camCtl;
+  if (!d || !d.supported) {
+    body.innerHTML = '<p class="cam-adj-note">Disponível no Windows.</p>';
+    return;
+  }
+  if (!d.found) {
+    body.innerHTML = '<p class="cam-adj-note">Esta câmera não oferece ajustes de imagem pelo Windows (comum em câmeras virtuais).</p>';
+    return;
+  }
+  const row = (group, key, label) => {
+    const c = d[group] && d[group][key];
+    if (!c || c.max <= c.min) return '';
+    const auto = !!c.auto;
+    return `<div class="cam-adj-row ${auto ? 'is-auto' : ''}">
+      <div class="cam-adj-lab"><span>${label}</span>
+        ${c.canAuto ? `<label class="cam-adj-auto"><input type="checkbox" data-cc-auto="${group}.${key}" ${auto ? 'checked' : ''} /> Auto</label>` : ''}
+        <output data-cc-out="${group}.${key}">${auto ? 'auto' : fmtCamValue(key, c.val, c)}</output></div>
+      <input type="range" data-cc="${group}.${key}" min="${c.min}" max="${c.max}" step="${Math.max(1, c.step)}" value="${c.val}" ${auto ? 'disabled' : ''}
+        style="--p:${((c.val - c.min) / (c.max - c.min)) * 100}%" />
+    </div>`;
+  };
+  const rows = [...CAM_PROC.map(([k, l]) => row('proc', k, l)), ...CAM_CAM.map(([k, l]) => row('cam', k, l))].join('');
+  body.innerHTML = `${d.plf ? `<div class="cam-adj-row"><div class="cam-adj-lab"><span>Anti-flicker</span></div>
+      <div class="seg">${PLF.map(([v, l]) => `<button data-cc-plf="${v}" class="${d.plf.val === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>` : ''}
+    ${rows || '<p class="cam-adj-note">Esta câmera não oferece ajustes de imagem (câmeras virtuais, como a OBSBOT Virtual Camera, são ajustadas no app delas).</p>'}
+    <div class="cam-adj-foot"><span>Os ajustes vão direto para a câmera e ficam salvos para ela.</span>
+      <button class="btn sm" id="cam-adj-reset">Restaurar padrão</button></div>`;
+}
+
+// Sends changes to the camera (throttled while a slider moves) and remembers them.
+let camSendTimer = null;
+let camPending = [];
+function camSend(changes) {
+  const label = camCtlLabel;
+  if (!label) return;
+  const saved = { ...(prefs.camControls[label] || {}) };
+  for (const c of changes) {
+    saved[`${c.group}.${c.prop}`] = { value: c.value, auto: !!c.auto };
+    const cur = camCtl && camCtl[c.group] && camCtl[c.group][c.prop];
+    if (cur) { cur.val = c.value; cur.auto = !!c.auto; }
+    if (c.group === 'plf' && camCtl && camCtl.plf) camCtl.plf.val = c.value;
+  }
+  prefs.camControls = { ...prefs.camControls, [label]: saved };
+  persist();
+  camPending = [...camPending.filter((p) => !changes.some((c) => c.group === p.group && c.prop === p.prop)), ...changes];
+  if (camSendTimer) return;
+  camSendTimer = setTimeout(async () => {
+    const batch = camPending;
+    camPending = [];
+    await api.camera.set(label, batch).catch(() => null);
+    camSendTimer = null;
+    if (camPending.length) camSend([]);
+  }, 120);
+}
+
+// Puts back the saved controls when a camera opens (some cameras reset on power-up).
+function reapplyCamControls() {
+  const label = camLabel();
+  const saved = prefs.camControls[label];
+  if (!label || !saved) return;
+  const changes = Object.entries(saved).map(([k, v]) => {
+    const [group, prop] = k.split('.');
+    return { group, prop: group === 'plf' ? '-' : prop, value: v.value, auto: v.auto };
+  });
+  if (changes.length) api.camera.set(label, changes).catch(() => {});
+}
+
+function bindCamControls() {
+  const body = $('#cam-adj-body');
+  $('#cam-adj').addEventListener('toggle', (e) => { if (e.target.open) loadCamControls(); });
+  body.addEventListener('input', (e) => {
+    const r = e.target.closest('[data-cc]');
+    if (!r) return;
+    const [group, prop] = r.dataset.cc.split('.');
+    const v = Number(r.value);
+    setRangeFill(r);
+    $(`[data-cc-out="${r.dataset.cc}"]`, body).textContent = fmtCamValue(prop, v, camCtl && camCtl[group] && camCtl[group][prop]);
+    camSend([{ group, prop, value: v, auto: false }]);
+  });
+  body.addEventListener('change', (e) => {
+    const a = e.target.closest('[data-cc-auto]');
+    if (!a) return;
+    const [group, prop] = a.dataset.ccAuto.split('.');
+    const c = camCtl[group][prop];
+    camSend([{ group, prop, value: c.val, auto: a.checked }]);
+    renderCamControls();
+  });
+  body.addEventListener('click', (e) => {
+    const p = e.target.closest('[data-cc-plf]');
+    if (p) {
+      camSend([{ group: 'plf', prop: '-', value: Number(p.dataset.ccPlf), auto: false }]);
+      renderCamControls();
+      return;
+    }
+    if (e.target.closest('#cam-adj-reset') && camCtl) {
+      const changes = [];
+      for (const group of ['proc', 'cam']) {
+        for (const [prop, c] of Object.entries(camCtl[group] || {})) changes.push({ group, prop, value: c.def, auto: !!c.canAuto && prop !== 'Zoom' });
+      }
+      camSend(changes);
+      const label = camCtlLabel;
+      prefs.camControls = { ...prefs.camControls, [label]: undefined };
+      delete prefs.camControls[label];
+      persist();
+      setTimeout(loadCamControls, 600);
     }
   });
 }
@@ -3070,6 +3219,7 @@ renderAreaRow();
 bindBackgroundImages();
 bindLive();
 bindCamFilters();
+bindCamControls();
 mixer.setSysGain(prefs.sysGain);
 if (prefs.cameraFilter) setCameraFilter(prefs.cameraFilter);
 $('#scene-banner-cancel').addEventListener('click', () => {
@@ -3080,4 +3230,5 @@ $('#scene-banner-cancel').addEventListener('click', () => {
 window.__app = {
   S, R, prefs, compositor, mixer, feeds, cutter, gallery, startRecording, stopRecording, togglePause, setActiveLayout, setOrientation, setView, exportProject,
   setCameraFilter, addLive, toggleLiveAll, applyBackground, renderBackgrounds,
+  showCamControls: (d) => { camCtl = d; camCtlLabel = camLabel() || 'teste'; renderCamControls(); },
 };

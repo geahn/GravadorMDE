@@ -1044,6 +1044,50 @@ function snapRes(v, list) {
   return near || v;
 }
 
+// ---------------------------------------------------------------- camera image controls (any UVC webcam)
+
+// native/camctl.exe talks to the standard Windows camera controls (the same
+// ones the cameras' own apps use): brightness, contrast, hue, white balance,
+// exposure, anti-flicker...
+function camctlPath() {
+  if (process.platform !== 'win32') return null;
+  const p = app.isPackaged ? path.join(process.resourcesPath, 'native', 'camctl.exe') : path.join(__dirname, 'native', 'camctl.exe');
+  return fs.existsSync(p) ? p : null;
+}
+
+function camctl(args) {
+  const exe = camctlPath();
+  if (!exe) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const proc = spawn(exe, args, { windowsHide: true });
+    let out = '';
+    const timer = setTimeout(() => { proc.kill(); resolve(null); }, 8000);
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(out)); } catch { resolve(null); }
+    });
+  });
+}
+
+// The browser names a camera "OBSBOT Tiny 2 StreamCamera (6e30:fef0)": match by
+// USB vendor:product id when there is one, else by name.
+async function camctlIndex(label) {
+  const list = await camctl(['list']);
+  if (!Array.isArray(list) || !list.length) return -1;
+  const ids = /\(([0-9a-f]{4}):([0-9a-f]{4})\)\s*$/i.exec(label || '');
+  const name = String(label || '').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '').trim().toLowerCase();
+  const byName = (d) => d.name && (d.name.toLowerCase() === name || name.includes(d.name.toLowerCase()) || d.name.toLowerCase().includes(name));
+  if (ids) {
+    const key = `vid_${ids[1]}&pid_${ids[2]}`.toLowerCase();
+    const hits = list.filter((d) => String(d.path).toLowerCase().includes(key));
+    if (hits.length) return (hits.find(byName) || hits[0]).index;
+  }
+  const hit = list.find(byName);
+  return hit ? hit.index : -1;
+}
+
 // ---------------------------------------------------------------- scenes (continue a recording)
 
 // Editor state kept in projeto.json (besides removed/inserts/audioDelay/title).
@@ -1615,6 +1659,23 @@ function registerIpc() {
       sidecars: done.mic && done.sys ? { mic: done.mic, sys: done.sys } : null,
       warning: warnings[0] || null,
     };
+  });
+
+  ipcMain.handle('camera:controls', async (_e, label) => {
+    if (!camctlPath()) return { supported: false };
+    const idx = await camctlIndex(label);
+    if (idx < 0) return { supported: true, found: false };
+    const data = await camctl(['get', String(idx)]);
+    return { supported: true, found: !!data, ...(data || {}) };
+  });
+  // changes: [{ group: 'proc'|'cam'|'plf', prop, value, auto }]
+  ipcMain.handle('camera:set', async (_e, label, changes) => {
+    if (!camctlPath() || !Array.isArray(changes) || !changes.length) return { ok: false };
+    const idx = await camctlIndex(label);
+    if (idx < 0) return { ok: false };
+    const args = ['set', String(idx)];
+    for (const c of changes) args.push(String(c.group), String(c.prop || '-'), String(Math.round(Number(c.value) || 0)), c.auto ? '1' : '0');
+    return (await camctl(args)) || { ok: false };
   });
 
   ipcMain.handle('project:cursor', async (_e, folder) => {

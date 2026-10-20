@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('api', {
     dataUrl: (file) => ipcRenderer.invoke('media:dataUrl', file),
   },
   cursor: (displayId) => ipcRenderer.invoke('cursor:get', displayId),
+  camera: {
+    controls: (label) => ipcRenderer.invoke('camera:controls', label),
+    set: (label, changes) => ipcRenderer.invoke('camera:set', label, changes),
+  },
   projectCursor: (folder) => ipcRenderer.invoke('project:cursor', folder),
   gallery: {
     list: (dir) => ipcRenderer.invoke('gallery:list', dir),
