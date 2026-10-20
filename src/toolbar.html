@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>Gravando</title>
+  <link rel="stylesheet" href="toolbar.css" />
+</head>
+<body>
+  <!-- countdown -->
+  <div class="countdown" id="countdown" hidden>
+    <button class="cd-circle" id="cd-cancel" title="Clique para cancelar">
+      <svg class="cd-ring" viewBox="0 0 220 220">
+        <circle class="track" cx="110" cy="110" r="100" />
+        <circle class="prog" id="cd-prog" cx="110" cy="110" r="100" />
+      </svg>
+      <span class="cd-num" id="cd-num">3</span>
+      <span class="cd-sub">clique para cancelar</span>
+    </button>
+  </div>
+
+  <!-- recording bar -->
+  <div class="bar-wrap" id="bar" hidden>
+    <div class="bar">
+      <span class="grip" title="Arraste para mover"><i data-icon="grip" data-size="16"></i></span>
+      <div class="rec">
+        <span class="dot"></span>
+        <span class="time" id="time">00:00:00</span>
+      </div>
+      <div class="vu" id="vu" title="Nível do microfone"><span></span><span></span><span></span><span></span><span></span></div>
+      <span class="warn-pill" id="mic-warn" hidden title="Confira o microfone escolhido e o volume">Microfone sem som?</span>
+      <span class="sep"></span>
+      <div class="layouts" id="layouts"></div>
+      <span class="sep"></span>
+      <button class="b" id="b-pause" title="Pausar (Alt+Shift+P)"></button>
+      <button class="b stop" id="b-stop" title="Parar e salvar (Alt+Shift+R)"><i data-icon="stop" data-size="13"></i><span>Parar</span></button>
+      <button class="b" id="b-discard" title="Descartar gravação"><i data-icon="trash" data-size="16"></i><span class="confirm">Descartar?</span></button>
+      <button class="b" id="b-script" title="Mostrar/ocultar o roteiro (não aparece na gravação)">📄</button>
+      <button class="b" id="b-studio" title="Abrir o estúdio (não aparece na gravação)"><i data-icon="layout" data-size="16"></i></button>
+    </div>
+  </div>
+
+  <script type="module" src="toolbar.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+{
+  "prefs": {
+    "fps": 30,
+    "quality": "eco",
+    "countdown": 3,
+    "mirror": false,
+    "micGain": 1,
+    "noise": true,
+    "systemAudio": true,
+    "openEditor": true,
+    "levelAudio": true,
+    "keepOriginal": false,
+    "recordMode": "final",
+    "intro": {
+      "name": "INTRO_2_a.mp4",
+      "isImage": false,
+      "hasAudio": true,
+      "duration": 3.72,
+      "file": "intro/horizontal/intro.mp4"
+    },
+    "introV": null,
+    "introEnabled": true,
+    "transition": {
+      "name": "transicao.mp4",
+      "isImage": false,
+      "hasAudio": true,
+      "duration": 2.14,
+      "file": "intro/transicao-horizontal/intro.mp4"
+    },
+    "transitionV": null,
+    "audioDelay": 100,
+    "mdeAuto": false,
+    "mdeBaseUrl": "",
+    "logo": null
+  },
+  "layoutSets": {
+    "h": [
+      {
+        "id": "aula",
+        "name": "Aula",
+        "base": "aula",
+        "custom": true,
+        "order": [
+          "screen",
+          "camera"
+        ],
+        "screen": {
+          "visible": true,
+          "x": 63,
+          "y": 70,
+          "w": 1676,
+          "h": 950,
+          "zoom": 1,
+          "panX": -1,
+          "panY": -1,
+          "shape": "rect",
+          "radius": 18,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        },
+        "camera": {
+          "visible": true,
+          "x": 1588,
+          "y": 282,
+          "w": 303,
+          "h": 517,
+          "zoom": 1,
+          "panX": -0.033942863634807696,
+          "panY": 0,
+          "shape": "rect",
+          "radius": 18,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        }
+      },
+      {
+        "id": "lado",
+        "name": "Lado a lado",
+        "base": "lado",
+        "custom": true,
+        "order": [
+          "screen",
+          "camera"
+        ],
+        "screen": {
+          "visible": true,
+          "x": 69,
+          "y": 84,
+          "w": 1514,
+          "h": 911,
+          "zoom": 1,
+          "panX": -1,
+          "panY": 0,
+          "shape": "rect",
+          "radius": 16,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        },
+        "camera": {
+          "visible": true,
+          "x": 1609,
+          "y": 291,
+          "w": 275,
+          "h": 498,
+          "zoom": 1,
+          "panX": 0,
+          "panY": 0,
+          "shape": "rect",
+          "radius": 16,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        }
+      }
+    ],
+    "v": [
+      {
+        "id": "v-split",
+        "name": "Tela + câmera",
+        "base": "v-split",
+        "custom": true,
+        "order": [
+          "screen",
+          "camera"
+        ],
+        "screen": {
+          "visible": true,
+          "x": 0,
+          "y": -48,
+          "w": 2444,
+          "h": 1032,
+          "zoom": 1,
+          "panX": 0,
+          "panY": 0,
+          "shape": "rect",
+          "radius": 0,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        },
+        "camera": {
+          "visible": true,
+          "x": -25,
+          "y": 930,
+          "w": 1105,
+          "h": 964,
+          "zoom": 1,
+          "panX": 0,
+          "panY": 0,
+          "shape": "rect",
+          "radius": 0,
+          "shadow": true,
+          "borderWidth": 0,
+          "borderColor": "#ffffff"
+        }
+      }
+    ]
+  },
+  "active": {
+    "h": "aula",
+    "v": "v-split"
+  },
+  "bg": {
+    "key": "grafite"
+  },
+  "orientation": "h",
+  "screenAspect": 2.3703703703703702
+}

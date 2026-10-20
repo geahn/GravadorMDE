@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>Roteiro</title>
+  <style>
+    :root { --bg: #121419; --panel: #181b22; --line: #2d323d; --text: #eceef3; --muted: #9aa1b1; --accent: #7b80ff; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font: 13px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+    .wrap { height: 100%; display: flex; flex-direction: column; border: 1px solid var(--line); }
+    header { -webkit-app-region: drag; display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 14px;
+      border-bottom: 1px solid var(--line); background: var(--panel); }
+    header b { font-weight: 600; margin-right: auto; }
+    header small { color: var(--muted); margin-right: 6px; }
+    button, input { -webkit-app-region: no-drag; }
+    button { height: 30px; min-width: 30px; padding: 0 9px; border: 0; border-radius: 8px; cursor: pointer;
+      background: transparent; color: var(--muted); font: 600 13px "Segoe UI", sans-serif; }
+    button:hover { background: #23272f; color: var(--text); }
+    button.on { background: var(--accent); color: #fff; }
+    input[type=range] { width: 80px; accent-color: var(--accent); }
+    textarea { flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 22px 26px 50vh;
+      background: var(--bg); color: var(--text); line-height: 1.45; font: 30px/1.45 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+    textarea::placeholder { color: #4d5361; }
+    textarea::-webkit-scrollbar { width: 10px; }
+    textarea::-webkit-scrollbar-thumb { background: #23272f; border-radius: 10px; border: 3px solid var(--bg); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <b>Roteiro</b>
+      <small>não aparece na gravação</small>
+      <button id="smaller" title="Diminuir letra">A−</button>
+      <button id="bigger" title="Aumentar letra">A+</button>
+      <button id="play" title="Rolagem automática">▶ Rolar</button>
+      <input type="range" id="speed" min="10" max="120" step="5" title="Velocidade da rolagem" />
+      <button id="close" title="Fechar">✕</button>
+    </header>
+    <textarea id="text" spellcheck="false" placeholder="Cole ou escreva aqui o roteiro da aula. Use “Rolar” para acompanhar a leitura enquanto grava."></textarea>
+  </div>
+  <script type="module" src="script.js"></script>
+</body>
+</html>

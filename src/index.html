@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file:; media-src 'self' blob: file:; script-src 'self'; worker-src blob:; style-src 'self' 'unsafe-inline'" />
+  <title>Gravador de Aulas</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <!-- ============================================================ title bar -->
+    <header class="titlebar">
+      <div class="brand">
+        <span class="brand-mark"><span></span></span>
+        <span class="brand-name">Gravador de Aulas</span>
+        <nav class="nav seg" id="nav">
+          <button data-view="studio" class="on"><i data-icon="camera" data-size="15"></i> Estúdio</button>
+          <button data-view="gallery"><i data-icon="grid" data-size="15"></i> Galeria</button>
+        </nav>
+      </div>
+      <div class="title-actions">
+        <button class="mde-pill" id="mde-pill" hidden title="Envios para o MDE (abre a galeria)"></button>
+        <button class="btn ghost sm" id="btn-undo" title="Desfazer (Ctrl+Z)"><i data-icon="undo" data-size="16"></i></button>
+        <button class="btn ghost sm" id="btn-redo" title="Refazer (Ctrl+Shift+Z)"><i data-icon="redo" data-size="16"></i></button>
+        <span class="divider"></span>
+        <button class="btn ghost sm" id="btn-script" title="Roteiro flutuante (não aparece na gravação)"><i data-icon="script" data-size="16"></i> Roteiro</button>
+        <button class="btn ghost sm" id="btn-open-video" title="Abrir um vídeo no editor de cortes"><i data-icon="scissors" data-size="16"></i> Abrir vídeo</button>
+        <button class="btn ghost sm" id="btn-sources"><i data-icon="monitor" data-size="16"></i> Fontes</button>
+        <button class="btn ghost sm" id="btn-settings"><i data-icon="settings" data-size="16"></i> Configurações</button>
+      </div>
+    </header>
+
+    <!-- ============================================================ workspace -->
+    <main class="workspace">
+      <section class="stage-area" id="stage-area">
+        <div class="stage" id="stage">
+          <canvas id="canvas"></canvas>
+          <div class="overlay" id="overlay"></div>
+          <div class="live-badge" id="live-badge"><span class="pulse"></span><span id="live-time">00:00</span></div>
+        </div>
+        <p class="stage-hint" id="stage-hint">
+          <span><b>Arraste</b> para mover</span>
+          <span><b>Cantos</b> para redimensionar</span>
+          <span><b>Roda do mouse</b> para zoom</span>
+          <span><b>Alt + arrastar</b> para enquadrar</span>
+          <span><b>Duplo clique</b> mostra tudo</span>
+        </p>
+      </section>
+
+      <aside class="inspector" id="inspector">
+        <section class="panel">
+          <div class="panel-head">
+            <h3>Layout</h3>
+            <button class="link" id="btn-reset-layout" title="Volta este layout para o padrão">Restaurar</button>
+          </div>
+          <div class="seg full orient" id="orient-tabs">
+            <button data-o="h"><span class="o-ico h"></span> Horizontal <small>16:9</small></button>
+            <button data-o="v"><span class="o-ico v"></span> Vertical <small>9:16</small></button>
+          </div>
+          <div class="layout-grid" id="layout-grid"></div>
+          <p class="note">Cada layout guarda seus ajustes. Clique duas vezes no nome para renomear. Durante a gravação, troque com <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>1</kbd>…<kbd>9</kbd>.</p>
+          <div class="menu" id="layout-menu" hidden>
+            <button data-menu-act="rename"><i data-icon="pencil" data-size="15"></i> Renomear</button>
+            <button data-menu-act="duplicate"><i data-icon="copy" data-size="15"></i> Duplicar</button>
+            <button data-menu-act="reset"><i data-icon="refresh" data-size="15"></i> Restaurar padrão</button>
+            <span class="menu-sep"></span>
+            <button data-menu-act="delete" class="danger"><i data-icon="trash" data-size="15"></i> Excluir</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h3>Camadas</h3></div>
+          <div class="layers" id="layers"></div>
+        </section>
+
+        <section class="panel" id="props"></section>
+
+        <section class="panel">
+          <div class="panel-head"><h3>Fundo</h3></div>
+          <div class="swatches" id="bg-swatches"></div>
+        </section>
+      </aside>
+    </main>
+
+    <!-- ============================================================ dock -->
+    <footer class="dock">
+      <div class="chips">
+        <button class="chip" id="chip-screen" data-focus="screen">
+          <span class="chip-icon"><i data-icon="monitor" data-size="16"></i></span>
+          <span class="chip-text"><small>Tela</small><span class="chip-value">—</span></span>
+        </button>
+        <button class="chip" id="chip-camera" data-focus="camera">
+          <span class="chip-icon"><i data-icon="camera" data-size="16"></i></span>
+          <span class="chip-text"><small>Câmera</small><span class="chip-value">—</span></span>
+        </button>
+        <button class="chip" id="chip-mic" data-focus="mic">
+          <span class="chip-icon"><i data-icon="mic" data-size="16"></i></span>
+          <span class="chip-text"><small>Microfone</small><span class="chip-value">—</span></span>
+          <span class="mini-meter"><span></span></span>
+        </button>
+      </div>
+
+      <div class="record-area" id="record-area">
+        <div class="rec-mode" id="rec-mode" title="O que salvar ao gravar">
+          <button data-v="final"><b>1 arquivo</b><small>vídeo final</small></button>
+          <button data-v="all"><b>3 arquivos</b><small>final + câmera + tela</small></button>
+        </div>
+        <button class="btn-record" id="btn-record" title="Iniciar gravação (Alt+Shift+R)">
+          <span class="rec-dot"></span><span class="rec-label">Gravar</span>
+        </button>
+        <div class="rec-controls" id="rec-controls">
+          <button class="btn round" id="btn-pause" title="Pausar (Alt+Shift+P)"><i data-icon="pause" data-size="16"></i></button>
+          <div class="rec-timer"><span class="pulse"></span><span id="rec-time">00:00:00</span></div>
+          <button class="btn stop" id="btn-stop" title="Parar e salvar (Alt+Shift+R)"><i data-icon="stop" data-size="14"></i> Parar</button>
+        </div>
+      </div>
+
+      <div class="output">
+        <span class="output-spec" id="output-spec">1920×1080 · 30 fps · MP4</span>
+        <button class="link output-dir" id="btn-open-dir" title="Abrir pasta das gravações"><i data-icon="folder" data-size="14"></i><span id="output-dir">Vídeos</span></button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ============================================================ sources modal -->
+  <div class="backdrop" id="sources-modal" hidden>
+    <div class="modal modal-sources" role="dialog" aria-labelledby="sources-title">
+      <header class="modal-head">
+        <div>
+          <h2 id="sources-title">O que você vai gravar?</h2>
+          <p>Escolha a tela, a câmera e o microfone. Dá para trocar a qualquer momento.</p>
+        </div>
+        <button class="btn ghost icon" data-close title="Fechar"><i data-icon="x"></i></button>
+      </header>
+
+      <div class="sources-body">
+        <section class="src-screens">
+          <div class="src-head">
+            <h3><i data-icon="monitor" data-size="16"></i> Tela</h3>
+            <div class="seg" id="src-tabs">
+              <button data-tab="screen" class="on">Telas</button>
+              <button data-tab="window">Janelas</button>
+            </div>
+            <button class="btn ghost sm icon" id="btn-refresh-sources" title="Atualizar lista"><i data-icon="refresh" data-size="16"></i></button>
+          </div>
+          <div class="thumbs" id="thumbs"></div>
+          <div class="area-row" id="area-row">
+            <span class="area-ico"><i data-icon="crop" data-size="16"></i></span>
+            <div class="area-text"><b id="area-title">Tela inteira</b><small id="area-sub">Grave só uma parte da tela: um app, um navegador, uma região.</small></div>
+            <button class="btn sm" id="area-pick">Selecionar área…</button>
+            <button class="btn sm ghost" id="area-clear" hidden>Usar a tela inteira</button>
+          </div>
+        </section>
+
+        <section class="src-devices">
+          <div class="field">
+            <h3><i data-icon="camera" data-size="16"></i> Câmera</h3>
+            <div class="select"><select id="cam-select"></select></div>
+            <div class="cam-preview" id="cam-preview">
+              <video id="cam-video" autoplay muted playsinline></video>
+              <div class="cam-empty"><i data-icon="cameraOff" data-size="22"></i><span>Sem câmera</span></div>
+            </div>
+          </div>
+
+          <div class="field">
+            <h3><i data-icon="mic" data-size="16"></i> Microfone</h3>
+            <div class="select"><select id="mic-select"></select></div>
+            <div class="meter" id="mic-meter"><span class="fill"></span><span class="ticks"></span></div>
+            <label class="slider-row">
+              <span>Volume</span>
+              <input type="range" id="mic-gain" min="0" max="200" step="1" value="100" />
+              <output id="mic-gain-val">100%</output>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" class="switch" id="noise" />
+              <span><b>Redução de ruído</b><small>Diminui ventilador, teclado e barulhos de fundo.</small></span>
+            </label>
+          </div>
+
+          <div class="field">
+            <label class="toggle-row">
+              <input type="checkbox" class="switch" id="sysaudio" />
+              <span><b>Gravar áudio do computador</b><small>Inclui o som do PC (vídeos, apps) junto com o microfone.</small></span>
+            </label>
+          </div>
+        </section>
+      </div>
+
+      <footer class="modal-foot">
+        <span class="foot-hint" id="sources-hint"></span>
+        <button class="btn primary lg" id="sources-done">Continuar para o estúdio <i data-icon="chevron" data-size="16"></i></button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ============================================================ settings modal -->
+  <div class="backdrop" id="settings-modal" hidden>
+    <div class="modal modal-settings" role="dialog" aria-labelledby="settings-title">
+      <header class="modal-head">
+        <div><h2 id="settings-title">Configurações</h2></div>
+        <button class="btn ghost icon" data-close title="Fechar"><i data-icon="x"></i></button>
+      </header>
+      <div class="settings-layout">
+        <nav class="set-tabs" id="set-tabs">
+          <button data-tab="rec" class="on"><i data-icon="camera" data-size="16"></i> Gravação</button>
+          <button data-tab="final"><i data-icon="film" data-size="16"></i> Vídeo final</button>
+          <button data-tab="intro"><i data-icon="layers3" data-size="16"></i> Intro, transição e logo</button>
+          <button data-tab="mde"><i data-icon="external" data-size="16"></i> Comunidade MDE <span class="tab-dot" id="mde-tab-dot" hidden></span></button>
+          <button data-tab="keys"><i data-icon="keyboard" data-size="16"></i> Atalhos</button>
+        </nav>
+        <div class="settings-body" id="settings-body">
+        <section class="set-pane" data-pane="rec">
+          <header class="pane-head"><h3>Gravação</h3><p>Onde salvar e como gravar.</p></header>
+        <div class="set-row">
+          <div class="set-label"><b>Pasta dos vídeos</b><small id="set-dir">—</small></div>
+          <div class="set-ctrl">
+            <button class="btn" id="set-dir-open"><i data-icon="folder" data-size="16"></i> Abrir</button>
+            <button class="btn" id="set-dir-change">Alterar…</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Quadros por segundo</b><small>60 fps deixa movimentos mais suaves, com arquivos maiores.</small></div>
+          <div class="seg" id="set-fps">
+            <button data-v="30">30 fps</button>
+            <button data-v="60">60 fps</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Contagem regressiva</b><small>Tempo para se preparar antes de começar.</small></div>
+          <div class="seg" id="set-countdown">
+            <button data-v="0">Sem</button>
+            <button data-v="3">3 s</button>
+            <button data-v="5">5 s</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Espelhar câmera</b><small>Inverte a imagem como num espelho.</small></div>
+          <input type="checkbox" class="switch" id="set-mirror" />
+        </div>
+
+        </section>
+        <section class="set-pane" data-pane="final" hidden>
+          <header class="pane-head"><h3>Vídeo final</h3><p>Tamanho do arquivo, editor e áudio.</p></header>
+        <div class="set-row">
+          <div class="set-label"><b>Tamanho do arquivo</b><small id="set-quality-note">—</small></div>
+          <div class="seg" id="set-quality">
+            <button data-v="eco">Menor</button>
+            <button data-v="standard">Equilibrado</button>
+            <button data-v="high">Máxima qualidade</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Abrir o editor de cortes ao terminar</b><small>Desligado, o vídeo é exportado direto, com a intro e o áudio nivelado.</small></div>
+          <input type="checkbox" class="switch" id="set-editor" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Nivelar o áudio</b><small>Iguala trechos baixos e altos, evita estouros e deixa tudo em −16 LUFS (padrão de aulas e podcasts).</small></div>
+          <input type="checkbox" class="switch" id="set-level" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Guardar também a gravação original</b><small>Desligado, o original vai para a Lixeira depois de exportar.</small></div>
+          <input type="checkbox" class="switch" id="set-keep" />
+        </div>
+
+        </section>
+        <section class="set-pane" data-pane="intro" hidden>
+          <header class="pane-head"><h3>Intro e transição</h3><p>Clipes que entram automaticamente nos seus vídeos.</p></header>
+        <h4 class="set-group" id="set-intro-anchor">Intro</h4>
+        <p class="set-note">Entra no começo de todos os vídeos: um vídeo curto ou uma imagem (logo, vinheta). Cada formato pode ter a sua.</p>
+        <div class="intro-card" data-slot="h">
+          <div class="intro-preview"><i data-icon="film" data-size="22"></i></div>
+          <div class="intro-info">
+            <span class="intro-slot">Horizontal · 16:9</span>
+            <b class="intro-name">Nenhuma intro definida</b>
+            <small class="intro-meta"></small>
+            <div class="intro-actions">
+              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
+              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
+              <div class="seg intro-image-dur" hidden>
+                <button data-v="3">3 s</button>
+                <button data-v="5">5 s</button>
+                <button data-v="8">8 s</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="intro-card" data-slot="v">
+          <div class="intro-preview v"><i data-icon="film" data-size="20"></i></div>
+          <div class="intro-info">
+            <span class="intro-slot">Vertical · 9:16</span>
+            <b class="intro-name">Nenhuma intro definida</b>
+            <small class="intro-meta"></small>
+            <div class="intro-actions">
+              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
+              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
+              <div class="seg intro-image-dur" hidden>
+                <button data-v="3">3 s</button>
+                <button data-v="5">5 s</button>
+                <button data-v="8">8 s</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Adicionar a intro automaticamente</b><small>Dá para desligar em cada vídeo, no editor.</small></div>
+          <input type="checkbox" class="switch" id="intro-enabled" />
+        </div>
+
+        <h4 class="set-group" id="set-logo-anchor">Logo (marca d'água)</h4>
+        <p class="set-note">Fica num canto de todos os vídeos, em qualquer layout. Use um PNG com fundo transparente.</p>
+        <div class="intro-card logo-card" id="logo-card">
+          <div class="intro-preview logo-preview" id="logo-preview"><i data-icon="image" data-size="22"></i></div>
+          <div class="intro-info">
+            <b id="logo-name">Nenhuma logo definida</b>
+            <div class="intro-actions">
+              <button class="btn sm" id="logo-pick">Escolher imagem…</button>
+              <button class="btn sm ghost" id="logo-remove" hidden>Remover</button>
+            </div>
+          </div>
+        </div>
+        <div id="logo-opts" hidden>
+          <div class="set-row">
+            <div class="set-label"><b>Posição</b></div>
+            <div class="seg" id="logo-pos">
+              <button data-v="tl">↖ Superior esq.</button>
+              <button data-v="tr">↗ Superior dir.</button>
+              <button data-v="bl">↙ Inferior esq.</button>
+              <button data-v="br">↘ Inferior dir.</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="set-label"><b>Tamanho</b><small id="logo-size-val">12% da largura</small></div>
+            <input type="range" id="logo-size" min="5" max="30" step="1" style="width:220px" />
+          </div>
+          <div class="set-row">
+            <div class="set-label"><b>Opacidade</b><small id="logo-op-val">90%</small></div>
+            <input type="range" id="logo-op" min="20" max="100" step="5" style="width:220px" />
+          </div>
+          <div class="set-row">
+            <div class="set-label"><b>Mostrar a logo nos vídeos</b></div>
+            <input type="checkbox" class="switch" id="logo-on" />
+          </div>
+        </div>
+
+        <h4 class="set-group" id="set-trans-anchor">Vídeo de transição</h4>
+        <p class="set-note">Um clipe de até 3 s (ex.: “alguns momentos depois”) que você insere entre dois trechos no editor.</p>
+        <div class="intro-card" data-slot="th">
+          <div class="intro-preview"><i data-icon="film" data-size="22"></i></div>
+          <div class="intro-info">
+            <span class="intro-slot">Horizontal · 16:9</span>
+            <b class="intro-name">Nenhuma transição definida</b>
+            <small class="intro-meta"></small>
+            <div class="intro-actions">
+              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
+              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
+              <div class="seg intro-image-dur" hidden>
+                <button data-v="1">1 s</button>
+                <button data-v="2">2 s</button>
+                <button data-v="3">3 s</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="intro-card" data-slot="tv">
+          <div class="intro-preview v"><i data-icon="film" data-size="20"></i></div>
+          <div class="intro-info">
+            <span class="intro-slot">Vertical · 9:16</span>
+            <b class="intro-name">Nenhuma transição definida</b>
+            <small class="intro-meta"></small>
+            <div class="intro-actions">
+              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
+              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
+              <div class="seg intro-image-dur" hidden>
+                <button data-v="1">1 s</button>
+                <button data-v="2">2 s</button>
+                <button data-v="3">3 s</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        </section>
+        <section class="set-pane" data-pane="mde" hidden>
+          <header class="pane-head"><h3>Comunidade MDE</h3><p>Publique suas aulas no painel do MDE sem sair do app.</p></header>
+          <div class="mde-card" id="mde-card">
+            <div class="mde-brand"><span class="mde-logo">MDE</span><div><b>Comunidade MDE</b><small>Envie as aulas editadas direto para o painel de aulas, como rascunho.</small></div></div>
+            <div class="mde-connected" id="mde-connected" hidden>
+              <span class="mde-dot ok"></span>
+              <div class="mde-conn-text"><b id="mde-conn-title">Conectado</b><small id="mde-conn-sub">Chave •••• 0000</small></div>
+              <button class="btn sm" id="mde-retest">Testar</button>
+              <button class="btn sm ghost" id="mde-change">Trocar chave</button>
+            </div>
+            <div class="mde-form" id="mde-form">
+              <label class="field-label" for="mde-key">Chave de API</label>
+              <div class="mde-key-row">
+                <input type="password" id="mde-key" class="text-input" placeholder="Cole aqui a sua chave pessoal do MDE" autocomplete="off" spellcheck="false" />
+                <button class="btn primary" id="mde-save">Salvar e testar</button>
+              </div>
+              <small class="field-help">Gere a chave no painel do MDE em <b>Admin → Chaves de API</b>. Ela fica guardada criptografada neste computador.</small>
+              <p class="mde-msg" id="mde-msg" hidden></p>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="set-label"><b>Enviar automaticamente após exportar</b><small>A aula vai para o MDE com o título do vídeo. Entra como rascunho: não é publicada nem avisa os alunos.</small></div>
+            <input type="checkbox" class="switch" id="mde-auto" />
+          </div>
+          <details class="set-advanced">
+            <summary>Avançado</summary>
+            <div class="set-row">
+              <div class="set-label"><b>Endereço da API</b><small>Só mude se o MDE pedir.</small></div>
+              <input type="text" id="mde-base" class="text-input mono" spellcheck="false" />
+            </div>
+          </details>
+        </section>
+        <section class="set-pane" data-pane="keys" hidden>
+          <header class="pane-head"><h3>Atalhos</h3><p>Para gravar e editar mais rápido.</p></header>
+        <div class="shortcuts">
+          <h4><i data-icon="keyboard" data-size="16"></i> Atalhos</h4>
+          <dl>
+            <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Iniciar / parar gravação (funciona em qualquer programa)</dd>
+            <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></dt><dd>Pausar / continuar</dd>
+            <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>1</kbd>…<kbd>9</kbd></dt><dd>Trocar de layout durante a gravação</dd>
+            <dt>Roda do mouse</dt><dd>Zoom no conteúdo da tela ou da câmera</dd>
+            <dt><kbd>Ctrl</kbd> + roda</dt><dd>Aumentar / diminuir a moldura</dd>
+            <dt><kbd>Alt</kbd> + arrastar</dt><dd>Enquadrar (mover o conteúdo dentro da moldura)</dd>
+            <dt><kbd>Shift</kbd> + canto</dt><dd>Redimensionar sem manter a proporção</dd>
+            <dt><kbd>Ctrl</kbd> + arrastar</dt><dd>Mover sem encaixe automático</dd>
+            <dt>Setas</dt><dd>Mover 1 px (<kbd>Shift</kbd> = 10 px)</dd>
+            <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Desfazer</dd>
+          </dl>
+          <h4><i data-icon="scissors" data-size="16"></i> No editor de cortes</h4>
+          <dl>
+            <dt>Arrastar</dt><dd>Selecionar um trecho (<kbd>Del</kbd> remove)</dd>
+            <dt><kbd>Espaço</kbd></dt><dd>Tocar / pausar (os trechos removidos são pulados)</dd>
+            <dt><kbd>Q</kbd> / <kbd>W</kbd></dt><dd>Cortar tudo antes / depois da agulha</dd>
+            <dt><kbd>I</kbd> / <kbd>O</kbd></dt><dd>Marcar início / fim da seleção na agulha</dd>
+            <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Voltar / avançar 1 s (<kbd>Shift</kbd> = 5 s, <kbd>,</kbd> <kbd>.</kbd> = 1 quadro)</dd>
+            <dt><kbd>Ctrl</kbd> + roda</dt><dd>Zoom na linha do tempo</dd>
+          </dl>
+        </div>
+        </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ result modal -->
+  <div class="backdrop" id="result-modal" hidden>
+    <div class="modal modal-result" role="dialog" aria-labelledby="result-title">
+      <header class="modal-head">
+        <div class="result-title">
+          <span class="ok-badge"><i data-icon="check" data-size="16"></i></span>
+          <div><h2 id="result-title">Vídeo pronto</h2><p id="result-meta">—</p></div>
+        </div>
+        <button class="btn ghost icon" data-close title="Fechar"><i data-icon="x"></i></button>
+      </header>
+      <video id="result-video" controls preload="metadata"></video>
+      <p class="result-warning" id="result-warning" hidden></p>
+      <footer class="modal-foot">
+        <span class="foot-hint result-name" id="result-name"></span>
+        <div class="foot-actions">
+          <button class="btn" id="result-folder"><i data-icon="folder" data-size="16"></i> Mostrar na pasta</button>
+          <button class="btn" id="result-open"><i data-icon="external" data-size="16"></i> Abrir no player</button>
+          <button class="btn" id="result-mde" hidden><i data-icon="external" data-size="16"></i> Enviar para o MDE</button>
+          <button class="btn" id="result-edit" hidden><i data-icon="scissors" data-size="16"></i> Editar</button>
+          <button class="btn primary" data-close id="result-close">Nova gravação</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ============================================================ gallery -->
+  <section class="gallery" id="gallery" hidden>
+    <header class="gal-head">
+      <div class="gal-title-wrap"><h2>Suas aulas</h2><span id="gal-count"></span></div>
+      <div class="gal-tools">
+        <label class="search"><i data-icon="search" data-size="15"></i><input type="text" id="gal-search" placeholder="Buscar pelo nome" /></label>
+        <div class="seg" id="gal-filter">
+          <button data-v="all" class="on">Todas</button>
+          <button data-v="h">Horizontais</button>
+          <button data-v="v">Verticais</button>
+        </div>
+        <button class="btn sm icon" id="gal-refresh" title="Atualizar"><i data-icon="refresh" data-size="16"></i></button>
+        <button class="btn sm" id="gal-folder"><i data-icon="folder" data-size="15"></i> Abrir pasta</button>
+      </div>
+    </header>
+    <div class="gal-scroll" id="gal-scroll">
+      <div class="gal-grid" id="gal-grid"></div>
+      <div class="gal-empty" id="gal-empty" hidden>
+        <span class="gal-empty-ico"><i data-icon="film" data-size="26"></i></span>
+        <b>Nenhuma aula por aqui ainda</b>
+        <small>As gravações aparecem aqui assim que você termina de gravar.</small>
+        <button class="btn primary" id="gal-go-studio">Ir para o estúdio</button>
+      </div>
+      <div class="gal-loading" id="gal-loading" hidden><span class="spinner"></span> Carregando suas aulas…</div>
+    </div>
+    <div class="menu" id="gal-menu" hidden>
+      <button data-gal-act="edit"><i data-icon="scissors" data-size="15"></i> Editar</button>
+      <button data-gal-act="rename"><i data-icon="pencil" data-size="15"></i> Renomear</button>
+      <button data-gal-act="mde-send"><i data-icon="external" data-size="15"></i> Enviar para o MDE</button>
+      <button data-gal-act="mde-open"><i data-icon="external" data-size="15"></i> Abrir aula no MDE</button>
+      <button data-gal-act="folder"><i data-icon="folder" data-size="15"></i> Mostrar na pasta</button>
+      <span class="menu-sep"></span>
+      <button data-gal-act="delete" class="danger"><i data-icon="trash" data-size="15"></i> Excluir</button>
+    </div>
+  </section>
+
+  <!-- ============================================================ cut editor -->
+  <section class="cutter" id="cutter" hidden>
+    <header class="cut-head">
+      <button class="btn ghost sm" id="cut-back"><i data-icon="back" data-size="16"></i> Estúdio</button>
+      <div class="cut-title">
+        <input id="cut-title-input" type="text" class="title-input" maxlength="180" placeholder="Título da aula" title="Título da aula: nome do arquivo e título no MDE" spellcheck="false" />
+        <span id="cut-file"></span>
+      </div>
+      <div class="cut-actions">
+        <button class="btn ghost sm" id="cut-discard"><i data-icon="trash" data-size="15"></i> Descartar</button>
+        <button class="btn primary lg" id="cut-export">Exportar vídeo <i data-icon="chevron" data-size="16"></i></button>
+      </div>
+    </header>
+
+    <div class="cut-stage">
+      <div class="cut-player">
+        <video id="cut-video" class="on" preload="auto" muted></video>
+        <video id="cut-video-b" preload="auto" muted></video>
+        <audio id="cut-audio" preload="auto"></audio>
+        <div class="cut-rate-flag" id="cut-rate-flag" hidden>2×</div>
+        <video id="cut-video-t" preload="auto"></video>
+        <div class="cut-removed-flag" id="cut-removed-flag" hidden><i data-icon="scissors" data-size="14"></i> Este trecho será removido</div>
+      </div>
+    </div>
+
+    <div class="cut-bar">
+      <div class="cut-transport">
+        <button class="btn round play" id="cut-play" title="Reproduzir (Espaço)"></button>
+        <span class="cut-time" id="cut-time">00:00 / 00:00</span>
+        <button class="btn ghost sm speed" id="cut-speed" title="Velocidade da prévia">1×</button>
+        <div class="pop-anchor">
+          <button class="btn ghost sm" id="cut-sync" title="Sincronia entre a voz e a boca"></button>
+          <div class="pop left" id="cut-sync-pop" hidden>
+            <h4>Sincronia do áudio</h4>
+            <p>A câmera entrega a imagem com um pequeno atraso. Se a voz vier antes da boca, aumente o valor até ficar natural na prévia.</p>
+            <label class="pop-slider"><span>Atrasar o áudio em</span><output id="cut-sync-val">0 ms</output>
+              <input type="range" id="cut-sync-ms" min="0" max="400" step="10" value="100" /></label>
+            <div class="pop-actions"><button class="btn sm ghost" id="cut-sync-reset">Zerar</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="cut-tools">
+        <button class="btn sm" id="cut-remove" title="Remover o trecho selecionado (Del)"><i data-icon="scissors" data-size="15"></i> Remover seleção</button>
+        <button class="btn sm" id="cut-trim-start" title="Remove tudo antes da agulha (Q)"><i data-icon="trimStart" data-size="15"></i> Cortar início</button>
+        <button class="btn sm" id="cut-trim-end" title="Remove tudo depois da agulha (W)"><i data-icon="trimEnd" data-size="15"></i> Cortar final</button>
+        <button class="btn sm" id="cut-transition" title="Insere o vídeo de transição na emenda (ou na agulha) — T"><i data-icon="film" data-size="15"></i> Transição</button>
+        <div class="pop-anchor">
+          <button class="btn sm" id="cut-pauses" title="Encontra e remove silêncios longos"><i data-icon="wand" data-size="15"></i> Remover pausas</button>
+          <div class="pop" id="cut-pause-pop" hidden>
+            <h4>Remover pausas longas</h4>
+            <p>Corta os silêncios para a aula ficar mais dinâmica. Fica um respiro curto antes e depois da fala.</p>
+            <label class="pop-slider"><span>Pausas com mais de</span><output id="cut-pause-val">1,0 s</output>
+              <input type="range" id="cut-pause-min" min="0.5" max="3" step="0.1" value="1" /></label>
+            <div class="pop-result" id="cut-pause-result"></div>
+            <div class="pop-actions">
+              <button class="btn sm ghost" id="cut-pause-cancel">Cancelar</button>
+              <button class="btn sm primary" id="cut-pause-apply">Remover pausas</button>
+            </div>
+          </div>
+        </div>
+        <span class="divider"></span>
+        <button class="btn ghost sm icon" id="cut-undo" title="Desfazer (Ctrl+Z)"><i data-icon="undo" data-size="16"></i></button>
+        <button class="btn ghost sm icon" id="cut-redo" title="Refazer (Ctrl+Shift+Z)"><i data-icon="redo" data-size="16"></i></button>
+      </div>
+      <div class="cut-right">
+        <span class="cut-summary" id="cut-summary"></span>
+        <div class="cut-zoom">
+          <button class="btn ghost sm icon" id="cut-zoom-out" title="Diminuir zoom"><i data-icon="zoomOut" data-size="16"></i></button>
+          <button class="btn ghost sm icon" id="cut-zoom-in" title="Aumentar zoom (Ctrl + roda)"><i data-icon="zoomIn" data-size="16"></i></button>
+          <button class="btn ghost sm icon" id="cut-zoom-fit" title="Ver o vídeo inteiro"><i data-icon="fit" data-size="16"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="cut-timeline">
+      <div class="cut-intro" id="cut-intro"></div>
+      <div class="cut-track-wrap">
+        <div class="cut-bubble" id="cut-bubble" hidden></div>
+        <div class="cut-hover" id="cut-hover" hidden><canvas width="160" height="90"></canvas><span id="cut-hover-time"></span></div>
+        <div class="cut-scroller" id="cut-scroller">
+          <div class="cut-inner" id="cut-inner"><canvas id="cut-canvas"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <p class="cut-hint"><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> volta · pausa · acelera · <b>Arraste</b> para selecionar e aperte <kbd>Del</kbd> para remover · <b>Clique numa emenda</b> (marcador vermelho) para restaurar ou pôr uma transição · <kbd>T</kbd> insere transição na agulha</p>
+    <video id="cut-thumb-video" muted preload="auto" hidden></video>
+  </section>
+
+  <!-- ============================================================ export progress -->
+  <div class="busy" id="export-overlay" hidden>
+    <div class="busy-card export-card">
+      <div class="exp-head">
+        <span class="spinner"></span>
+        <div><b id="exp-title">Exportando o vídeo…</b><small id="exp-phase">Preparando</small></div>
+      </div>
+      <div class="exp-bar"><span id="exp-fill"></span></div>
+      <div class="exp-meta"><span id="exp-pct">0%</span><span id="exp-eta"></span></div>
+      <button class="btn sm" id="exp-cancel">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ confirm -->
+  <div class="backdrop" id="confirm-modal" hidden>
+    <div class="modal modal-confirm" role="alertdialog" aria-labelledby="confirm-title">
+      <div class="confirm-body"><h3 id="confirm-title"></h3><p id="confirm-text"></p></div>
+      <footer class="modal-foot">
+        <span></span>
+        <div class="foot-actions">
+          <button class="btn" id="confirm-cancel">Cancelar</button>
+          <button class="btn primary" id="confirm-ok">OK</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ============================================================ busy / toasts -->
+  <div class="busy" id="busy" hidden>
+    <div class="busy-card"><span class="spinner"></span><div><b id="busy-title">Finalizando seu vídeo…</b><small>Isso leva só alguns segundos.</small></div></div>
+  </div>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>Selecionar área</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; cursor: crosshair; user-select: none;
+      font: 14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: #eceef3; }
+    #shade { position: fixed; inset: 0; background: rgba(5, 6, 10, .5); }
+    #box { position: fixed; display: none; outline: 2px solid #7b80ff; box-shadow: 0 0 0 99999px rgba(5, 6, 10, .55); }
+    #size { position: absolute; left: -2px; top: -30px; padding: 4px 8px; border-radius: 6px; background: #7b80ff; color: #fff;
+      font: 600 12px "Segoe UI", sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .hint { position: fixed; top: 28px; left: 50%; transform: translateX(-50%); padding: 11px 18px; border-radius: 12px;
+      background: rgba(18, 20, 25, .94); box-shadow: 0 12px 34px rgba(0, 0, 0, .5); white-space: nowrap; pointer-events: none; }
+    .hint b { color: #fff; }
+    .hint span { color: #9aa1b1; }
+    #bar { position: fixed; display: none; gap: 6px; padding: 6px; border-radius: 12px; background: rgba(18, 20, 25, .96);
+      box-shadow: 0 12px 34px rgba(0, 0, 0, .55); cursor: default; }
+    #bar button { height: 34px; padding: 0 14px; border: 0; border-radius: 9px; cursor: pointer; font: 600 13px "Segoe UI", sans-serif;
+      background: #20242d; color: #eceef3; }
+    #bar button:hover { background: #2a2f3a; }
+    #bar button.primary { background: #7b80ff; color: #fff; }
+    #bar button.primary:hover { background: #9ea2ff; }
+  </style>
+</head>
+<body>
+  <div id="shade"></div>
+  <div id="box"><span id="size"></span></div>
+  <div class="hint" id="hint"><b>Arraste</b> para escolher a área que será gravada <span>· Shift trava em 16:9 · Enter confirma · Esc cancela</span></div>
+  <div id="bar">
+    <button class="primary" id="ok">Usar esta área</button>
+    <button id="redo">Refazer</button>
+    <button id="cancel">Cancelar</button>
+  </div>
+  <script type="module" src="region.js"></script>
+</body>
+</html>
