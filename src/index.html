@@ -178,7 +178,13 @@
             <div class="select"><select id="cam-select"></select></div>
             <div class="cam-preview" id="cam-preview">
               <video id="cam-video" autoplay muted playsinline></video>
+              <canvas id="cam-canvas" width="640" height="360"></canvas>
               <div class="cam-empty"><i data-icon="cameraOff" data-size="22"></i><span>Sem câmera</span></div>
+            </div>
+            <div class="cam-fx" id="cam-fx">
+              <div class="cam-fx-head"><span>Filtro da câmera</span><output id="cam-fx-name">Nenhum</output></div>
+              <div class="cam-fx-list" id="cam-fx-list"></div>
+              <small class="cam-fx-note">Aplicado ao vivo e gravado no vídeo. Seus filtros salvos no editor aparecem aqui também.</small>
             </div>
           </div>
 

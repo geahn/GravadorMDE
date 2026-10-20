@@ -896,6 +896,7 @@ async function setCamera(id) {
   renderChips();
   renderLayers();
   editor.render();
+  $('#cam-fx').hidden = !id;
 }
 
 let micToken = 0;
@@ -1139,14 +1140,6 @@ function renderProps() {
 
     <label class="prop-inline"><span>Sombra</span><input type="checkbox" class="switch" data-check="shadow" /></label>
     ${isCam ? '<label class="prop-inline"><span>Espelhar imagem</span><input type="checkbox" class="switch" data-check="mirror" /></label>' : ''}
-    ${isCam ? `<div class="prop">
-      <div class="prop-label"><span>Filtro da câmera</span></div>
-      <select class="cs-select" data-cam-filter>
-        <option value="">Nenhum</option>
-        ${FX_PRESETS.map((f) => `<option value="${f.id}" ${prefs.cameraFilter && prefs.cameraFilter.name === f.name ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
-        ${(prefs.userFilters || []).length ? `<optgroup label="Meus filtros">${prefs.userFilters.map((f) => `<option value="u-${esc(f.id)}" ${prefs.cameraFilter && prefs.cameraFilter.name === f.name ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</optgroup>` : ''}
-      </select>
-    </div>` : ''}
 
     <div class="prop-actions">
       <button class="btn sm" data-act="center">Centralizar</button>
@@ -1228,10 +1221,6 @@ function bindProps() {
       editLayer(name, { shadow: t.checked });
     } else if (t.dataset.check === 'mirror') {
       setMirror(t.checked);
-    } else if (t.matches('[data-cam-filter]')) {
-      const v = t.value;
-      const f = !v ? null : v.startsWith('u-') ? prefs.userFilters.find((x) => `u-${x.id}` === v) : FX_PRESETS.find((x) => x.id === v);
-      setCameraFilter(f ? { name: f.name, p: { ...f.p } } : null);
     }
   });
   el.addEventListener('click', (e) => {
@@ -1443,6 +1432,7 @@ function openSources() {
   $('#noise').checked = prefs.noise;
   $('#sysaudio').checked = prefs.systemAudio;
   renderSysGain();
+  renderCamFilters();
   loadSources();
   clearInterval(srcRefreshTimer);
   srcRefreshTimer = setInterval(() => { if (!$('#sources-modal').hidden) loadSources(); }, 5000);
@@ -2604,11 +2594,90 @@ function sampleCursor(now) {
 
 // ================================================================== camera filter / computer audio volume
 
+// A canvas caches a filter by its name: every change gets a new name.
+let camFxN = 0;
 function setCameraFilter(f) {
   prefs.cameraFilter = f || null;
-  compositor.camFilter = f ? cssFilter(f.p, 'cam-fx', { blurScale: 1 }) : 'none';
+  camFxN += 1;
+  compositor.camFilter = f ? cssFilter(f.p, `cam-fx-${camFxN}`, { blurScale: 1 }) : 'none';
   persist();
-  if (editor.selected === 'camera') renderProps();
+  renderCamFilters();
+}
+
+// "O que você vai gravar?" -> Câmera: filter chips, each one showing the camera itself.
+function camFilterList() {
+  return [{ id: 'none', name: 'Nenhum', p: null }, ...FX_PRESETS.map((f) => ({ id: f.id, name: f.name, p: f.p })),
+    ...(prefs.userFilters || []).map((f) => ({ id: `u-${f.id}`, name: f.name, p: f.p, user: true }))];
+}
+
+function renderCamFilters() {
+  const box = $('#cam-fx-list');
+  if (!box) return;
+  const cur = prefs.cameraFilter;
+  const list = camFilterList();
+  const isOn = (f) => (cur ? f.p && f.name === cur.name : f.id === 'none');
+  box.innerHTML = list.map((f) => `<button class="cam-fx-chip ${isOn(f) ? 'on' : ''}" data-cam-fx="${esc(f.id)}" title="${esc(f.name)}">
+      <canvas width="96" height="54"></canvas><span>${esc(f.name)}</span></button>`).join('');
+  $('#cam-fx-name').textContent = cur ? cur.name : 'Nenhum';
+  // on the frame around the <video>: a filter on the video element itself can be skipped by hardware overlays
+  paintCamFilterThumbs();
+}
+
+function paintCamFilterThumbs() {
+  const v = $('#cam-video');
+  const list = camFilterList();
+  const ready = v && v.readyState >= 2 && v.videoWidth;
+  for (const btn of $$('#cam-fx-list [data-cam-fx]')) {
+    const cv = btn.querySelector('canvas');
+    const f = list.find((x) => x.id === btn.dataset.camFx);
+    const ctx = cv.getContext('2d');
+    if (ready) {
+      const s = Math.max(cv.width / v.videoWidth, cv.height / v.videoHeight);
+      const w = v.videoWidth * s;
+      const h = v.videoHeight * s;
+      ctx.save();
+      if (prefs.mirror) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(v, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+      ctx.restore();
+    } else {
+      const g = ctx.createLinearGradient(0, 0, cv.width, cv.height);
+      g.addColorStop(0, '#f6a35a');
+      g.addColorStop(0.5, '#5b8def');
+      g.addColorStop(1, '#2c3e50');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+    }
+    cv.style.filter = f && f.p ? cssFilter(f.p, `camthumb-${f.id}`, { blurScale: 0.05 }) : '';
+  }
+}
+
+function bindCamFilters() {
+  $('#cam-fx-list').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cam-fx]');
+    if (!b) return;
+    const f = camFilterList().find((x) => x.id === b.dataset.camFx);
+    setCameraFilter(f && f.p ? { name: f.name, p: { ...f.p } } : null);
+  });
+  // thumbnails follow the camera while the window is open
+  setInterval(() => { if (!$('#sources-modal').hidden && feeds.camera) paintCamFilterThumbs(); }, 1000);
+  $('#cam-video').addEventListener('loadeddata', paintCamFilterThumbs);
+  const cv = $('#cam-canvas');
+  const draw = () => {
+    requestAnimationFrame(draw);
+    const v = $('#cam-video');
+    if ($('#sources-modal').hidden || !v.videoWidth || v.readyState < 2) return;
+    const ctx = cv.getContext('2d');
+    const s = Math.max(cv.width / v.videoWidth, cv.height / v.videoHeight);
+    const w = v.videoWidth * s;
+    const h = v.videoHeight * s;
+    ctx.save();
+    // same filter the recording uses (see Compositor.drawLayer)
+    ctx.filter = compositor.camFilter || 'none';
+    if (prefs.mirror) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(v, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+    ctx.restore();
+  };
+  requestAnimationFrame(draw);
 }
 
 function renderSysGain() {
@@ -2958,6 +3027,7 @@ applyLogo();
 renderAreaRow();
 bindBackgroundImages();
 bindLive();
+bindCamFilters();
 mixer.setSysGain(prefs.sysGain);
 if (prefs.cameraFilter) setCameraFilter(prefs.cameraFilter);
 $('#scene-banner-cancel').addEventListener('click', () => {

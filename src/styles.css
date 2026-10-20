@@ -619,6 +619,10 @@ input[type="range"]:disabled { opacity: .35; pointer-events: none; }
 }
 .cam-preview video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cam-preview.mirror video { transform: scaleX(-1); }
+/* the preview is drawn on a canvas so the camera filter shows exactly */
+.cam-preview video { position: absolute; opacity: 0; pointer-events: none; }
+#cam-canvas { width: 100%; height: 100%; display: block; }
+.cam-preview.empty #cam-canvas { display: none; }
 .cam-empty {
   position: absolute; inset: 0; display: none; flex-direction: column; gap: 8px;
   align-items: center; justify-content: center; color: var(--faint); font-size: 13px;
@@ -1335,3 +1339,21 @@ body.in-gallery .title-actions .divider { display: none; }
   box-shadow: 0 0 0 1px var(--line-2);
 }
 .live-preview canvas { width: 100%; height: 100%; display: block; }
+
+/* camera filter (sources window) */
+.cam-fx { margin-top: 12px; }
+.cam-fx-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.cam-fx-head output { color: var(--text); font-weight: 600; }
+.cam-fx-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+.cam-fx-list::-webkit-scrollbar { height: 7px; }
+.cam-fx-list::-webkit-scrollbar-thumb { background: var(--panel-3); border-radius: 7px; }
+.cam-fx-chip {
+  flex: none; width: 84px; padding: 0; border-radius: 9px; overflow: hidden; cursor: pointer;
+  border: 1px solid var(--line-2); background: var(--panel-2); color: var(--muted); font-size: 11px;
+  display: flex; flex-direction: column;
+}
+.cam-fx-chip canvas { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; }
+.cam-fx-chip span { padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.cam-fx-chip:hover { border-color: var(--accent); color: var(--text); }
+.cam-fx-chip.on { border-color: var(--accent-hi); box-shadow: 0 0 0 1px var(--accent-hi); color: var(--text); }
+.cam-fx-note { display: block; margin-top: 4px; color: var(--faint); font-size: 11.5px; }

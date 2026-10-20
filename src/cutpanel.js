@@ -461,7 +461,6 @@ export class CutPanel {
       <div class="cs-seg wide" data-scope>
         <button data-fx-scope="global" class="${scope === 'global' ? 'on' : ''}">Vídeo inteiro</button>
         <button data-fx-scope="range" class="${scope === 'range' ? 'on' : ''}">Trecho</button>
-        <button data-fx-scope="camera" class="${scope === 'camera' ? 'on' : ''}">Câmera ao vivo</button>
       </div>
       <p class="cs-note">${scope === 'global' ? 'O filtro vale para a aula toda. Filtros de trecho ficam por cima dele.'
     : scope === 'range' ? (c.sel ? 'Vai cobrir o trecho selecionado.' : 'Vai entrar na agulha com 5 s; ajuste na faixa “Filtros” da linha do tempo.')
