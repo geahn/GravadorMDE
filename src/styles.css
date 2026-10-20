@@ -559,10 +559,10 @@ input[type="range"]:disabled { opacity: .35; pointer-events: none; }
 .foot-actions { display: flex; gap: 8px; }
 
 /* sources */
-.modal-sources { width: min(1180px, 100%); height: min(760px, 100%); }
+.modal-sources { width: min(1180px, 100%); height: min(760px, 100%); min-height: 0; overflow: hidden; }
 .sources-body {
   flex: 1; min-height: 0;
-  display: grid; grid-template-columns: minmax(0, 1fr) 360px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 360px; grid-template-rows: minmax(0, 1fr);
   border-top: 1px solid var(--line);
 }
 .src-screens { display: flex; flex-direction: column; min-height: 0; padding: 18px 20px 20px 24px; }
