@@ -209,6 +209,15 @@ export function layoutText(item, W, H, ctx = mctx()) {
   return { s, px, lines, widths, asc, desc, lineH, textW, textH, padX, padY, w: textW + padX * 2, h: textH + padY * 2 };
 }
 
+// One reusable offscreen canvas (drawing is synchronous, so sharing is safe).
+let scratch = null;
+function scratchCanvas(w, h) {
+  if (!scratch) scratch = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : document.createElement('canvas');
+  if (scratch.width !== w) scratch.width = w;
+  if (scratch.height !== h) scratch.height = h;
+  return scratch;
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
@@ -381,28 +390,35 @@ export function drawItem(ctx, item, W, H, res, tl = null) {
     const { w, h } = itemSize(item, W, H, res);
     const src = res && (res.img || res.video);
     const r = (item.radius || 0) * Math.min(w, h);
-    if (item.shadow) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = Math.min(w, h) * 0.08;
-      ctx.shadowOffsetY = Math.min(w, h) * 0.03;
-      ctx.fillStyle = '#000';
-      roundRect(ctx, -w / 2, -h / 2, w, h, r);
-      if (item.kind !== 'sticker') ctx.fill();
-      ctx.restore();
-    }
-    ctx.save();
-    if (r > 0 && item.kind !== 'sticker') {
-      roundRect(ctx, -w / 2, -h / 2, w, h, r);
-      ctx.clip();
-    }
+    // The shadow follows the picture's own shape (transparent PNGs keep their
+    // transparency): the image, already clipped to its rounded corners, is
+    // drawn once with the shadow settings, never on top of a filled box.
     if (src) {
-      try { ctx.drawImage(src, -w / 2, -h / 2, w, h); } catch { /* not decodable yet */ }
+      let pic = src;
+      const sw = Math.max(1, Math.round(w));
+      const sh = Math.max(1, Math.round(h));
+      if (r > 0 && item.kind !== 'sticker') {
+        pic = scratchCanvas(sw, sh);
+        const pc = pic.getContext('2d');
+        pc.clearRect(0, 0, sw, sh);
+        pc.save();
+        roundRect(pc, 0, 0, sw, sh, r * (sw / w));
+        pc.clip();
+        try { pc.drawImage(src, 0, 0, sw, sh); } catch { /* not decodable yet */ }
+        pc.restore();
+      }
+      ctx.save();
+      if (item.shadow) {
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = Math.min(w, h) * 0.08;
+        ctx.shadowOffsetY = Math.min(w, h) * 0.03;
+      }
+      try { ctx.drawImage(pic, -w / 2, -h / 2, w, h); } catch { /* not decodable yet */ }
+      ctx.restore();
     } else if (item.kind !== 'sticker' && !item.ringOnly) {
       ctx.fillStyle = 'rgba(123,128,255,0.25)';
       ctx.fillRect(-w / 2, -h / 2, w, h);
     }
-    ctx.restore();
     const bw = (item.border || 0) * Math.min(W, H) / 1080;
     if (bw > 0 && item.kind !== 'sticker') {
       ctx.lineWidth = bw;
