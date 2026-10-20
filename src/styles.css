@@ -1357,3 +1357,7 @@ body.in-gallery .title-actions .divider { display: none; }
 .cam-fx-chip:hover { border-color: var(--accent); color: var(--text); }
 .cam-fx-chip.on { border-color: var(--accent-hi); box-shadow: 0 0 0 1px var(--accent-hi); color: var(--text); }
 .cam-fx-note { display: block; margin-top: 4px; color: var(--faint); font-size: 11.5px; }
+
+.cam-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.cam-tools .seg button { padding: 0 10px; min-width: 0; font-variant-numeric: tabular-nums; }
+.cam-mirror { display: flex; align-items: center; gap: 8px; width: 100%; color: var(--text); cursor: pointer; }

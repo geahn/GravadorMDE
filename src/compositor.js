@@ -116,6 +116,8 @@ export class Compositor {
     this.display = { screen: null, camera: null };
     this.order = ['screen', 'camera'];
     this.mirror = false;
+    this.camRotate = 0; // 0 | 90 | 180 | 270 (clockwise)
+    this.rotCanvas = null;
     this.anim = null;
     this.bg = ['#000000', '#000000'];
     this.bgFill = '#000000';
@@ -153,6 +155,7 @@ export class Compositor {
   sourceSize(name) {
     const f = this.feeds[name];
     if (!f || !f.w) return null;
+    if (name === 'camera' && (this.camRotate === 90 || this.camRotate === 270)) return { w: f.h, h: f.w };
     const c = this.crops[name];
     return c ? { w: f.w * c.w, h: f.h * c.h } : { w: f.w, h: f.h };
   }
@@ -266,7 +269,7 @@ export class Compositor {
       const d = this.display[name];
       const feed = this.feeds[name];
       if (!d || !feed) continue;
-      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none');
+      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none', name === 'camera' ? this.camRotate : 0);
     }
     this.drawLogo();
     this.drawLive(now);
@@ -308,7 +311,23 @@ export class Compositor {
     for (const id of this.liveCache.keys()) if (!seen.has(id)) { this.liveCache.delete(id); this.liveAlpha.delete(id); }
   }
 
-  drawLayer(d, feed, mirror, crop = null, filter = 'none') {
+  // The camera picture turned by 90/180/270 degrees (clockwise), on a reused canvas.
+  rotated(img, w, h, deg) {
+    const side = deg === 90 || deg === 270;
+    const c = this.rotCanvas || (this.rotCanvas = document.createElement('canvas'));
+    const cw = side ? h : w;
+    const ch = side ? w : h;
+    if (c.width !== cw) c.width = cw;
+    if (c.height !== ch) c.height = ch;
+    const x = c.getContext('2d');
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.translate(cw / 2, ch / 2);
+    x.rotate((deg * Math.PI) / 180);
+    x.drawImage(img, -w / 2, -h / 2, w, h);
+    return c;
+  }
+
+  drawLayer(d, feed, mirror, crop = null, filter = 'none', rotate = 0) {
     if (d.op <= 0.004 || d.w < 2 || d.h < 2) return;
     const { ctx } = this;
     const r = Math.max(0, Math.min(d.r, d.w / 2, d.h / 2));
@@ -330,11 +349,18 @@ export class Compositor {
 
     ctx.save();
     ctx.clip(path);
-    const img = feed.image;
-    const ox = crop ? feed.w * crop.x : 0;
-    const oy = crop ? feed.h * crop.y : 0;
-    const sw = crop ? feed.w * crop.w : feed.w;
-    const sh = crop ? feed.h * crop.h : feed.h;
+    let img = feed.image;
+    let fw = feed.w;
+    let fh = feed.h;
+    if (img && rotate && fw && fh) {
+      img = this.rotated(img, fw, fh, rotate);
+      fw = img.width;
+      fh = img.height;
+    }
+    const ox = crop ? fw * crop.x : 0;
+    const oy = crop ? fh * crop.y : 0;
+    const sw = crop ? fw * crop.w : fw;
+    const sh = crop ? fh * crop.h : fh;
     if (img && sw && sh) {
       const c = cropFor(d, sw, sh);
       if (filter && filter !== 'none') ctx.filter = filter;

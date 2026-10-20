@@ -38,6 +38,7 @@ const prefs = {
   quality: 'standard',
   countdown: 3,
   mirror: false,
+  camRotate: 0, // 0 | 90 | 180 | 270: turns the camera picture (clockwise)
   micGain: 1,
   noise: true,
   systemAudio: false,
@@ -153,6 +154,7 @@ const canvas = $('#canvas');
 const compositor = new Compositor(canvas);
 const mixer = new AudioMixer();
 compositor.mirror = prefs.mirror;
+compositor.camRotate = [0, 90, 180, 270].includes(prefs.camRotate) ? prefs.camRotate : 0;
 mixer.setMicGain(prefs.micGain);
 
 const feeds = { screen: null, camera: null };
@@ -1140,6 +1142,10 @@ function renderProps() {
 
     <label class="prop-inline"><span>Sombra</span><input type="checkbox" class="switch" data-check="shadow" /></label>
     ${isCam ? '<label class="prop-inline"><span>Espelhar imagem</span><input type="checkbox" class="switch" data-check="mirror" /></label>' : ''}
+    ${isCam ? `<div class="prop">
+      <div class="prop-label"><span>Girar câmera</span></div>
+      <div class="seg full" data-seg="rotate">${[0, 90, 180, 270].map((v) => `<button data-rot="${v}" class="${prefs.camRotate === v ? 'on' : ''}">${v}°</button>`).join('')}</div>
+    </div>` : ''}
 
     <div class="prop-actions">
       <button class="btn sm" data-act="center">Centralizar</button>
@@ -1232,6 +1238,8 @@ function bindProps() {
     if (b.dataset.border) {
       if (b.dataset.border === 'none') editLayer(name, { borderWidth: 0 });
       else editLayer(name, { borderColor: b.dataset.border, borderWidth: l.borderWidth || 5 });
+    } else if (b.dataset.rot !== undefined) {
+      setCamRotate(Number(b.dataset.rot));
     } else if (b.closest('[data-seg="shape"]')) {
       const shape = b.dataset.v;
       if (shape === l.shape) return;
@@ -1261,11 +1269,37 @@ function bindProps() {
   });
 }
 
+// Turns the camera (for a camera mounted sideways or upside down).
+function setCamRotate(deg) {
+  const v = [0, 90, 180, 270].includes(deg) ? deg : 0;
+  prefs.camRotate = v;
+  compositor.camRotate = v;
+  persist();
+  $$('[data-rot]').forEach((b) => b.classList.toggle('on', Number(b.dataset.rot) === v));
+  editor.render();
+  paintCamFilterThumbs();
+}
+
+// Draws the camera onto a small canvas as the recording will show it: turned, mirrored, filling the box.
+function drawCamTo(ctx, v, cw, ch) {
+  const rot = prefs.camRotate || 0;
+  const side = rot === 90 || rot === 270;
+  const vw = side ? v.videoHeight : v.videoWidth;
+  const vh = side ? v.videoWidth : v.videoHeight;
+  const s = Math.max(cw / vw, ch / vh);
+  ctx.translate(cw / 2, ch / 2);
+  if (prefs.mirror) ctx.scale(-1, 1);
+  if (rot) ctx.rotate((rot * Math.PI) / 180);
+  ctx.drawImage(v, (-v.videoWidth * s) / 2, (-v.videoHeight * s) / 2, v.videoWidth * s, v.videoHeight * s);
+}
+
 function setMirror(on) {
   prefs.mirror = on;
   compositor.mirror = on;
   $('#cam-preview').classList.toggle('mirror', on);
   $('#set-mirror').checked = on;
+  $('#cam-mirror').checked = on;
+  paintCamFilterThumbs();
   persist();
   syncProps();
 }
@@ -1498,6 +1532,7 @@ function renderSettings() {
   segOn('#set-countdown', prefs.countdown);
   $$('#set-fps button').forEach((b) => { b.disabled = R.state !== 'idle'; });
   $('#set-mirror').checked = prefs.mirror;
+  $$('#set-rotate [data-rot]').forEach((b) => b.classList.toggle('on', Number(b.dataset.rot) === (prefs.camRotate || 0)));
   $('#set-editor').checked = prefs.openEditor;
   $('#set-level').checked = prefs.levelAudio;
   $('#set-keep').checked = prefs.keepOriginal;
@@ -1607,6 +1642,10 @@ function bindSettings() {
     renderSettings();
   });
   $('#set-mirror').addEventListener('change', (e) => setMirror(e.target.checked));
+  $('#set-rotate').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rot]');
+    if (b) setCamRotate(Number(b.dataset.rot));
+  });
   $('#set-editor').addEventListener('change', (e) => { prefs.openEditor = e.target.checked; persist(); });
   $('#set-level').addEventListener('change', (e) => { prefs.levelAudio = e.target.checked; persist(); });
   $('#set-keep').addEventListener('change', (e) => { prefs.keepOriginal = e.target.checked; persist(); });
@@ -2619,6 +2658,8 @@ function renderCamFilters() {
   box.innerHTML = list.map((f) => `<button class="cam-fx-chip ${isOn(f) ? 'on' : ''}" data-cam-fx="${esc(f.id)}" title="${esc(f.name)}">
       <canvas width="96" height="54"></canvas><span>${esc(f.name)}</span></button>`).join('');
   $('#cam-fx-name').textContent = cur ? cur.name : 'Nenhum';
+  $('#cam-mirror').checked = !!prefs.mirror;
+  $$('#cam-tools [data-rot]').forEach((b) => b.classList.toggle('on', Number(b.dataset.rot) === (prefs.camRotate || 0)));
   // on the frame around the <video>: a filter on the video element itself can be skipped by hardware overlays
   paintCamFilterThumbs();
 }
@@ -2632,12 +2673,10 @@ function paintCamFilterThumbs() {
     const f = list.find((x) => x.id === btn.dataset.camFx);
     const ctx = cv.getContext('2d');
     if (ready) {
-      const s = Math.max(cv.width / v.videoWidth, cv.height / v.videoHeight);
-      const w = v.videoWidth * s;
-      const h = v.videoHeight * s;
       ctx.save();
-      if (prefs.mirror) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
-      ctx.drawImage(v, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      drawCamTo(ctx, v, cv.width, cv.height);
       ctx.restore();
     } else {
       const g = ctx.createLinearGradient(0, 0, cv.width, cv.height);
@@ -2652,6 +2691,11 @@ function paintCamFilterThumbs() {
 }
 
 function bindCamFilters() {
+  $('#cam-tools').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rot]');
+    if (b) setCamRotate(Number(b.dataset.rot));
+  });
+  $('#cam-mirror').addEventListener('change', (e) => setMirror(e.target.checked));
   $('#cam-fx-list').addEventListener('click', (e) => {
     const b = e.target.closest('[data-cam-fx]');
     if (!b) return;
@@ -2667,14 +2711,12 @@ function bindCamFilters() {
     const v = $('#cam-video');
     if ($('#sources-modal').hidden || !v.videoWidth || v.readyState < 2) return;
     const ctx = cv.getContext('2d');
-    const s = Math.max(cv.width / v.videoWidth, cv.height / v.videoHeight);
-    const w = v.videoWidth * s;
-    const h = v.videoHeight * s;
     ctx.save();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cv.width, cv.height);
     // same filter the recording uses (see Compositor.drawLayer)
     ctx.filter = compositor.camFilter || 'none';
-    if (prefs.mirror) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
-    ctx.drawImage(v, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+    drawCamTo(ctx, v, cv.width, cv.height);
     ctx.restore();
   };
   requestAnimationFrame(draw);
