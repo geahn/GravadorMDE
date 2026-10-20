@@ -4,6 +4,7 @@
 // so recording keeps going while the studio window is minimized.
 
 import { drawItem, itemBounds } from './textstyles.js';
+import { Beauty, beautyOn } from './beauty.js';
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -117,6 +118,8 @@ export class Compositor {
     this.order = ['screen', 'camera'];
     this.mirror = false;
     this.camRotate = 0; // 0 | 90 | 180 | 270 (clockwise)
+    this.beauty = null; // { smooth, tone, bright, rosy, sharp } applied to the camera
+    this.beautyFx = null;
     this.rotCanvas = null;
     this.anim = null;
     this.bg = ['#000000', '#000000'];
@@ -269,7 +272,7 @@ export class Compositor {
       const d = this.display[name];
       const feed = this.feeds[name];
       if (!d || !feed) continue;
-      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none', name === 'camera' ? this.camRotate : 0);
+      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none', name === 'camera' ? this.camRotate : 0, name === 'camera' ? this.beauty : null);
     }
     this.drawLogo();
     this.drawLive(now);
@@ -327,7 +330,14 @@ export class Compositor {
     return c;
   }
 
-  drawLayer(d, feed, mirror, crop = null, filter = 'none', rotate = 0) {
+  // The camera picture through the beauty treatment (GPU), when it is on.
+  beautify(img, w, h, b) {
+    if (!beautyOn(b)) return img;
+    if (!this.beautyFx) this.beautyFx = new Beauty();
+    return this.beautyFx.process(img, w, h, b);
+  }
+
+  drawLayer(d, feed, mirror, crop = null, filter = 'none', rotate = 0, beauty = null) {
     if (d.op <= 0.004 || d.w < 2 || d.h < 2) return;
     const { ctx } = this;
     const r = Math.max(0, Math.min(d.r, d.w / 2, d.h / 2));
@@ -352,6 +362,7 @@ export class Compositor {
     let img = feed.image;
     let fw = feed.w;
     let fh = feed.h;
+    if (img && beauty) img = this.beautify(img, fw, fh, beauty);
     if (img && rotate && fw && fh) {
       img = this.rotated(img, fw, fh, rotate);
       fw = img.width;

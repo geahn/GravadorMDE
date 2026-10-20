@@ -3,6 +3,7 @@ import {
 } from './layouts.js';
 import { Compositor, Feed, createTicker, BG_PATTERNS, patternCanvas, cropFor } from './compositor.js';
 import { cssFilter, FX_PRESETS } from './fx.js';
+import { BEAUTY_KEYS, beautyOn } from './beauty.js';
 import { STICKERS, stickerUrl, TEXT_STYLES, BASE_STYLE } from './textstyles.js';
 import { bindFields, textPropsHTML, styleCardsHTML, paintStyleCards, posHTML, range as fRange, color as fColor } from './cutpanel.js';
 import { AudioMixer } from './audio.js';
@@ -39,6 +40,7 @@ const prefs = {
   countdown: 3,
   mirror: false,
   camRotate: 0, // 0 | 90 | 180 | 270: turns the camera picture (clockwise)
+  beauty: null, // { smooth, tone, bright, rosy, sharp } 0..100: live skin treatment of the camera
   micGain: 1,
   noise: true,
   systemAudio: false,
@@ -156,6 +158,7 @@ const compositor = new Compositor(canvas);
 const mixer = new AudioMixer();
 compositor.mirror = prefs.mirror;
 compositor.camRotate = [0, 90, 180, 270].includes(prefs.camRotate) ? prefs.camRotate : 0;
+compositor.beauty = beautyOn(prefs.beauty) ? prefs.beauty : null;
 mixer.setMicGain(prefs.micGain);
 
 const feeds = { screen: null, camera: null };
@@ -901,6 +904,7 @@ async function setCamera(id) {
   editor.render();
   $('#cam-fx').hidden = !id;
   $('#cam-adj').hidden = !id;
+  $('#beauty').hidden = !id;
   if (id && feeds.camera) reapplyCamControls();
   if ($('#cam-adj').open) loadCamControls();
 }
@@ -1376,6 +1380,48 @@ function reapplyCamControls() {
   if (changes.length) api.camera.set(label, changes).catch(() => {});
 }
 
+// ================================================================== beauty (any camera)
+
+const BEAUTY_PRESETS = [
+  ['Desligada', null], ['Natural', { smooth: 35, tone: 20, bright: 10, rosy: 0, sharp: 15 }],
+  ['Suave', { smooth: 60, tone: 40, bright: 20, rosy: 15, sharp: 10 }], ['Intensa', { smooth: 85, tone: 60, bright: 30, rosy: 25, sharp: 20 }],
+];
+
+function setBeauty(b) {
+  prefs.beauty = beautyOn(b) ? { ...b } : null;
+  compositor.beauty = prefs.beauty;
+  persist();
+}
+
+function renderBeauty() {
+  const b = prefs.beauty || {};
+  $('#beauty-body').innerHTML = `
+    <div class="cs-chips">${BEAUTY_PRESETS.map(([n, v]) => `<button data-beauty-preset="${n}" class="${JSON.stringify(v) === JSON.stringify(prefs.beauty) ? 'on' : ''}">${n}</button>`).join('')}</div>
+    ${BEAUTY_KEYS.map(([k, l]) => `<div class="cam-adj-row"><div class="cam-adj-lab"><span>${l}</span><output data-beauty-out="${k}">${Number(b[k]) || 0}</output></div>
+      <input type="range" data-beauty="${k}" min="0" max="100" step="1" value="${Number(b[k]) || 0}" style="--p:${Number(b[k]) || 0}%" /></div>`).join('')}
+    <p class="cam-adj-note">Feito no próprio computador (placa de vídeo), funciona com qualquer câmera e fica gravado no vídeo.</p>`;
+  $('#beauty-sub').textContent = beautyOn(prefs.beauty) ? 'ligada' : 'pele lisa, tom, iluminação, rosado, nitidez';
+}
+
+function bindBeauty() {
+  const box = $('#beauty-body');
+  box.addEventListener('input', (e) => {
+    const r = e.target.closest('[data-beauty]');
+    if (!r) return;
+    setRangeFill(r);
+    $(`[data-beauty-out="${r.dataset.beauty}"]`, box).textContent = r.value;
+    setBeauty({ ...(prefs.beauty || {}), [r.dataset.beauty]: Number(r.value) });
+    $('#beauty-sub').textContent = beautyOn(prefs.beauty) ? 'ligada' : 'pele lisa, tom, iluminação, rosado, nitidez';
+  });
+  box.addEventListener('click', (e) => {
+    const p = e.target.closest('[data-beauty-preset]');
+    if (!p) return;
+    setBeauty((BEAUTY_PRESETS.find(([n]) => n === p.dataset.beautyPreset) || [])[1] || null);
+    renderBeauty();
+  });
+  renderBeauty();
+}
+
 function bindCamControls() {
   const body = $('#cam-adj-body');
   $('#cam-adj').addEventListener('toggle', (e) => { if (e.target.open) loadCamControls(); });
@@ -1430,7 +1476,7 @@ function setCamRotate(deg) {
 }
 
 // Draws the camera onto a small canvas as the recording will show it: turned, mirrored, filling the box.
-function drawCamTo(ctx, v, cw, ch) {
+function drawCamTo(ctx, v, cw, ch, pic = v) {
   const rot = prefs.camRotate || 0;
   const side = rot === 90 || rot === 270;
   const vw = side ? v.videoHeight : v.videoWidth;
@@ -1439,7 +1485,7 @@ function drawCamTo(ctx, v, cw, ch) {
   ctx.translate(cw / 2, ch / 2);
   if (prefs.mirror) ctx.scale(-1, 1);
   if (rot) ctx.rotate((rot * Math.PI) / 180);
-  ctx.drawImage(v, (-v.videoWidth * s) / 2, (-v.videoHeight * s) / 2, v.videoWidth * s, v.videoHeight * s);
+  ctx.drawImage(pic, (-v.videoWidth * s) / 2, (-v.videoHeight * s) / 2, v.videoWidth * s, v.videoHeight * s);
 }
 
 function setMirror(on) {
@@ -2865,7 +2911,7 @@ function bindCamFilters() {
     ctx.fillRect(0, 0, cv.width, cv.height);
     // same filter the recording uses (see Compositor.drawLayer)
     ctx.filter = compositor.camFilter || 'none';
-    drawCamTo(ctx, v, cv.width, cv.height);
+    drawCamTo(ctx, v, cv.width, cv.height, compositor.beauty ? compositor.beautify(v, v.videoWidth, v.videoHeight, compositor.beauty) : v);
     ctx.restore();
   };
   requestAnimationFrame(draw);
@@ -3220,6 +3266,7 @@ bindBackgroundImages();
 bindLive();
 bindCamFilters();
 bindCamControls();
+bindBeauty();
 mixer.setSysGain(prefs.sysGain);
 if (prefs.cameraFilter) setCameraFilter(prefs.cameraFilter);
 $('#scene-banner-cancel').addEventListener('click', () => {
