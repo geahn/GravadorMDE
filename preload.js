@@ -34,6 +34,16 @@ contextBridge.exposeInMainWorld('api', {
     list: (dir) => ipcRenderer.invoke('gallery:list', dir),
     rename: (item, title) => ipcRenderer.invoke('gallery:rename', item, title),
     trash: (item) => ipcRenderer.invoke('gallery:trash', item),
+    item: (folder) => ipcRenderer.invoke('gallery:item', folder),
+  },
+  scene: {
+    pick: () => ipcRenderer.invoke('scene:pick'),
+    add: (folder, file) => ipcRenderer.invoke('scene:add', folder, file),
+  },
+  transitions: {
+    builtin: () => ipcRenderer.invoke('transition:builtin'),
+    add: () => ipcRenderer.invoke('transition:add'),
+    remove: (file) => ipcRenderer.invoke('transition:remove', file),
   },
   saveProject: (folder, patch) => ipcRenderer.invoke('project:save', folder, patch),
   mde: {
@@ -71,6 +81,7 @@ contextBridge.exposeInMainWorld('api', {
     chunk: (key, buf) => ipcRenderer.invoke('rec:chunk', key, buf),
     finish: (opts) => ipcRenderer.invoke('rec:finish', opts),
     discard: () => ipcRenderer.invoke('rec:discard'),
+    asset: (name, dataUrl) => ipcRenderer.invoke('rec:asset', name, dataUrl),
     status: (s) => ipcRenderer.send('rec:status', s),
     onGo: on('rec:go'),
     onCancel: on('rec:cancel'),

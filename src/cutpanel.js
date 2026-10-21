@@ -12,6 +12,7 @@ const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clone = (v) => JSON.parse(JSON.stringify(v));
 const dec = (v, n = 1) => String(Number(Number(v).toFixed(n))).replace('.', ',');
 
 function fmtClock(t) {
@@ -259,7 +260,7 @@ export function posHTML(o, open, { anim = true } = {}) {
 // ---------------------------------------------------------------- the panel
 
 const TABS = [
-  ['texto', 'Texto', 'type'], ['midia', 'Mídia', 'image'], ['zoom', 'Zoom', 'zoomIn'], ['filtros', 'Filtros', 'palette'],
+  ['texto', 'Texto', 'type'], ['midia', 'Mídia', 'image'], ['layout', 'Layout', 'layout'], ['filtros', 'Filtros', 'palette'],
   ['audio', 'Áudio', 'headphones'], ['velocidade', 'Veloc.', 'gauge'], ['cenas', 'Cenas', 'clapper'],
 ];
 
@@ -305,7 +306,7 @@ export class CutPanel {
   showFor(ref) {
     const it = this.c.findItem(ref);
     if (ref && it) {
-      if (ref.lane === 'zoom') this.tab = 'zoom';
+      if (ref.lane === 'zoom' || ref.lane === 'layout') this.tab = 'layout';
       else if (ref.lane === 'fx' || ref.lane === 'fxg') {
         this.tab = 'filtros';
         this.fxScope = ref.lane === 'fx' ? 'range' : 'global';
@@ -368,7 +369,7 @@ export class CutPanel {
       </div>
       <div class="cs-row"><button class="btn sm" data-act="to-playhead" title="Começar na agulha">${icon('chevron', 14)} Começar na agulha</button>
       <button class="btn sm" data-act="to-sel" ${this.c.sel ? '' : 'disabled'} title="Ocupar o trecho selecionado">Usar seleção</button></div>
-      <p class="cs-note">${lane === 'zoom' ? 'Dica: arraste o bloco na faixa “Zoom” ou as pontas dele.' : 'Dica: arraste o bloco na linha do tempo ou as pontas dele.'}</p>
+      <p class="cs-note">${lane === 'zoom' || lane === 'layout' ? 'Dica: arraste o bloco na faixa “Layout” ou as pontas dele.' : 'Dica: arraste o bloco na linha do tempo ou as pontas dele.'}</p>
     `, true);
   }
 
@@ -422,25 +423,110 @@ export class CutPanel {
       <div class="cs-emojis">${EMOJIS.map((e) => `<button data-emoji="${e}">${e}</button>`).join('')}</div>`;
   }
 
-  tab_zoom() {
+  // Layout: zooms (whole picture, or inside the screen / the camera) and the
+  // layout of each stretch (the formats registered in the studio, adjustable here).
+  tab_layout() {
     const c = this.c;
-    const z = this.sel && c.selItem.lane === 'zoom' ? this.sel : null;
+    const ref = c.selItem;
+    const z = this.sel && ref && ref.lane === 'zoom' ? this.sel : null;
+    const lay = this.sel && ref && ref.lane === 'layout' ? this.sel : null;
+    const canLayer = c.canLayerZoom();
+    const canRe = c.canRecompose();
     const list = [...c.zooms].map((x) => ({ x, ...c.span(x) })).sort((a, b) => a.o0 - b.o0);
-    return `
-      <div class="cs-head"><h4>Zoom</h4><button class="btn sm primary" data-act="add-zoom" title="Zoom na agulha ou no trecho selecionado (Z)">${icon('plus', 14)} Adicionar zoom</button></div>
-      ${z ? `<div class="cs-props">
+    const TG = { all: 'tudo', screen: 'tela', camera: 'câmera' };
+    const zoomProps = z ? `<div class="cs-props">
+        ${seg('target', 'Zoom em', z.target || 'all', [['all', 'Tudo', 'O vídeo inteiro'], ['screen', `${icon('monitor', 14)} Tela`, 'Só dentro da tela'], ['camera', `${icon('camera', 14)} Câmera`, 'Só dentro da câmera']])}
+        ${!canLayer && (z.target || 'all') !== 'all' ? '<p class="cs-warn">Esta aula não tem o registro do layout da gravação: o zoom vale para o vídeo inteiro.</p>' : ''}
+        ${!canLayer ? '<p class="cs-note">Zoom só na tela ou só na câmera: em gravações feitas a partir desta versão (com a câmera e a tela em arquivos separados).</p>' : ''}
         ${range('scale', 'Aproximação', z.scale, 1.1, 5, 0.05, 'x', { num: 0.01 })}
-        ${seg('mode', 'Foco', z.mode, [['fixed', `${icon('crop', 14)} Ponto fixo`], ['follow', `${icon('mouse', 14)} Seguir o mouse`]])}
-        ${z.mode === 'follow' && !c.cursor ? '<p class="cs-warn">Esta gravação não tem o movimento do mouse (só gravações de tela feitas a partir desta versão têm). Usando o ponto fixo.</p>' : ''}
-        ${z.mode === 'fixed' ? `<p class="cs-note">Arraste o retângulo na prévia para escolher o ponto, ou use:</p>
+        ${(z.target || 'all') !== 'camera' ? seg('mode', 'Foco', z.mode, [['fixed', `${icon('crop', 14)} Ponto fixo`], ['follow', `${icon('mouse', 14)} Seguir o mouse`]]) : ''}
+        ${z.mode === 'follow' && !c.cursor ? '<p class="cs-warn">Esta gravação não tem o movimento do mouse. Usando o ponto fixo.</p>' : ''}
+        ${z.mode === 'fixed' || (z.target || 'all') === 'camera' ? `<p class="cs-note">Arraste o retângulo na prévia para escolher o ponto, ou use:</p>
           <div class="cs-posgrid">${[0.25, 0.5, 0.75].map((y) => [0.25, 0.5, 0.75].map((x) => `<button data-zpos="${x},${y}"><i></i></button>`).join('')).join('')}</div>` : '<p class="cs-note">A câmera acompanha o mouse com suavidade e só se mexe quando ele sai do centro.</p>'}
         ${range('ease', 'Suavidade da entrada e saída', z.ease ?? 0.6, 0.1, 2, 0.05, 's')}
         ${this.timingHTML(z, 'zoom')}
         ${this.actionsHTML(false)}
-      </div>` : '<p class="cs-note">Selecione um trecho na linha do tempo (ou deixe a agulha onde o zoom começa) e clique em Adicionar zoom. Na faixa “Zoom”, clique duplo também adiciona.</p>'}
-      ${list.length ? `<div class="cs-subtitle">Zooms <span>${list.length}</span></div>
-        <div class="cs-list">${list.map(({ x, o0, o1 }) => `<button class="cs-li ${z && z.id === x.id ? 'on' : ''}" data-pick-zoom="${x.id}">
-          <span class="cs-dot" style="--c:#f5b84a"></span><span>${fmtClock(o0)} – ${fmtClock(o1)}</span><b>${dec(x.scale, 2)}× ${x.mode === 'follow' ? '· mouse' : ''}</b></button>`).join('')}</div>` : ''}`;
+      </div>` : '';
+    return `
+      <div class="cs-head"><h4>Zoom</h4><button class="btn sm primary" data-act="add-zoom" data-target="all" title="Zoom no trecho selecionado ou na agulha (Z)">${icon('plus', 14)} Zoom</button></div>
+      <div class="cs-row">
+        <button class="btn sm" data-act="add-zoom" data-target="screen" ${canLayer ? '' : 'disabled'} title="Aproxima só a tela, sem mexer na câmera">${icon('monitor', 14)} Zoom na tela</button>
+        <button class="btn sm" data-act="add-zoom" data-target="camera" ${canLayer ? '' : 'disabled'} title="Aproxima só a câmera">${icon('camera', 14)} Zoom na câmera</button>
+      </div>
+      ${zoomProps || (c.sel ? '<p class="cs-note">O zoom vai cobrir o trecho selecionado.</p>' : '<p class="cs-note">Selecione um trecho na linha do tempo (ou deixe a agulha onde o zoom começa) e adicione.</p>')}
+      ${list.length ? `<div class="cs-list">${list.map(({ x, o0, o1 }) => `<button class="cs-li ${z && z.id === x.id ? 'on' : ''}" data-pick-zoom="${x.id}">
+          <span class="cs-dot" style="--c:#f5b84a"></span><span>${fmtClock(o0)} – ${fmtClock(o1)}</span><b>${dec(x.scale, 2)}× · ${TG[x.target || 'all']}${x.mode === 'follow' && x.target !== 'camera' ? ' · mouse' : ''}</b></button>`).join('')}</div>` : ''}
+      <div class="cs-head cs-head2"><h4>Formato</h4></div>
+      ${canRe ? `<p class="cs-note">${lay ? 'Escolha outro formato para este trecho ou ajuste abaixo.' : (c.sel ? 'Clique em um formato para usá-lo no trecho selecionado.' : 'Clique em um formato: ele entra na agulha por 5 s (ou selecione o trecho antes).')}</p>
+        ${this.formatsHTML(lay)}
+        ${lay ? this.layoutPropsHTML(lay) : ''}`
+    : '<p class="cs-note">Trocar o formato depois de gravar precisa dos arquivos separados da câmera e da tela, que as gravações feitas a partir desta versão sempre têm.</p>'}`;
+  }
+
+  orientation() {
+    const p = this.c.p;
+    return p.orientation || ((p.height || 0) > (p.width || 1) ? 'v' : 'h');
+  }
+
+  formats() {
+    return this.c.getLayoutFormats(this.orientation()) || [];
+  }
+
+  // Little drawing of a layout: the screen (blue) and the camera (pink).
+  formatThumb(sc) {
+    const W = this.c.p.width || 1920;
+    const H = this.c.p.height || 1080;
+    const r = (L, color) => {
+      if (!L || L.visible === false) return '';
+      const rad = L.shape === 'circle' ? Math.min(L.w, L.h) / 2 : (L.radius || 0);
+      return `<rect x="${L.x}" y="${L.y}" width="${L.w}" height="${L.h}" rx="${rad}" fill="${color}" ${L.borderWidth > 0 ? `stroke="${esc(L.borderColor || '#fff')}" stroke-width="${L.borderWidth * 2}"` : ''}/>`;
+    };
+    const order = sc.order || ['screen', 'camera'];
+    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"><rect width="${W}" height="${H}" fill="#1b1e26"/>${order.map((k) => r(sc[k], k === 'screen' ? '#5b8def' : '#f472b6')).join('')}</svg>`;
+  }
+
+  formatsHTML(lay) {
+    const list = this.formats();
+    const cur = lay ? JSON.stringify(lay.scene) : '';
+    const v = this.orientation() === 'v';
+    return `<div class="cs-formats ${v ? 'v' : ''}">${list.map((f) => {
+      const sc = { order: f.order, screen: f.screen, camera: f.camera };
+      return `<button class="cs-format ${cur === JSON.stringify(sc) ? 'on' : ''}" data-format="${esc(f.id)}" title="${esc(f.name)}">${this.formatThumb(sc)}<span>${esc(f.name)}</span></button>`;
+    }).join('')}</div>`;
+  }
+
+  layoutPropsHTML(lay) {
+    const W = this.c.p.width || 1920;
+    const H = this.c.p.height || 1080;
+    const sc = lay.scene;
+    const layer = (k, title) => {
+      const L = sc[k] || {};
+      const pre = `scene.${k}`;
+      return sec(`lay-${k}`, title, `
+        <label class="cs-check"><input type="checkbox" class="switch sm" data-k="${pre}.visible" data-t="bool" ${L.visible !== false ? 'checked' : ''} /><span>Mostrar</span></label>
+        ${L.visible !== false ? `
+        <div class="cs-row two">${range(`${pre}.x`, 'Esquerda', L.x, -W / 2, W, 1, 'px', { num: 1 })}${range(`${pre}.y`, 'Topo', L.y, -H / 2, H, 1, 'px', { num: 1 })}</div>
+        <div class="cs-row two">${range(`${pre}.w`, 'Largura', L.w, 40, W * 1.2, 1, 'px', { num: 1 })}${range(`${pre}.h`, 'Altura', L.h, 40, H * 1.2, 1, 'px', { num: 1 })}</div>
+        ${seg(`${pre}.shape`, 'Forma', L.shape || 'rect', [['rect', 'Retângulo'], ['circle', 'Círculo']])}
+        ${L.shape !== 'circle' ? range(`${pre}.radius`, 'Cantos', L.radius || 0, 0, 300, 1, 'px') : ''}
+        ${range(`${pre}.zoom`, 'Aproximar a imagem', L.zoom || 1, 1, 3, 0.01, 'x')}
+        ${(L.zoom || 1) > 1.001 ? `${range(`${pre}.panX`, 'Mover na horizontal', L.panX || 0, -1, 1, 0.01, 'em')}${range(`${pre}.panY`, 'Mover na vertical', L.panY || 0, -1, 1, 0.01, 'em')}` : ''}
+        ${range(`${pre}.borderWidth`, 'Borda', L.borderWidth || 0, 0, 24, 1, 'px')}
+        ${(L.borderWidth || 0) > 0 ? color(`${pre}.borderColor`, 'Cor da borda', L.borderColor || '#ffffff') : ''}
+        <label class="cs-check"><input type="checkbox" class="switch sm" data-k="${pre}.shadow" data-t="bool" ${L.shadow ? 'checked' : ''} /><span>Sombra</span></label>` : ''}
+      `, this.open_.has(`lay-${k}`));
+    };
+    const camFront = (sc.order || ['screen', 'camera'])[1] === 'camera';
+    return `<div class="cs-props">
+      <div class="cs-subtitle">Ajustar “${esc(lay.name || 'Layout')}” neste trecho</div>
+      ${layer('screen', 'Tela')}
+      ${layer('camera', 'Câmera')}
+      <div class="cs-row"><button class="btn sm" data-act="swap-order">${camFront ? 'Pôr a tela na frente' : 'Pôr a câmera na frente'}</button></div>
+      <div class="cs-row"><input type="text" class="cs-input" id="cs-format-name" placeholder="Nome do novo formato" maxlength="40" value="" />
+        <button class="btn sm" data-act="save-format" title="Cadastra este layout nos formatos do estúdio">${icon('save', 14)} Salvar formato</button></div>
+      ${this.timingHTML(lay, 'layout')}
+      ${this.actionsHTML()}
+    </div>`;
   }
 
   tab_filtros() {
@@ -540,13 +626,16 @@ export class CutPanel {
     const c = this.c;
     const can = !!(c.p.folder && c.p.original);
     return `
-      <div class="cs-head"><h4>Cenas</h4><button class="btn sm primary" data-act="new-scene" ${can ? '' : 'disabled'}>${icon('rec', 14)} Gravar nova cena</button></div>
-      <p class="cs-note">${can ? 'Parou a gravação? Grave uma nova cena: ela entra no fim da aula e pode ser arrastada para qualquer posição, aqui ou na faixa “Cenas” da linha do tempo.'
-    : 'Novas cenas só podem ser gravadas em aulas feitas por este app que ainda têm os arquivos originais.'}</p>
+      <div class="cs-head"><h4>Cenas</h4>
+        <div class="cs-head-btns"><button class="btn sm primary" data-act="new-scene" ${can ? '' : 'disabled'}>${icon('rec', 14)} Gravar nova cena</button>
+        <button class="btn sm" data-act="upload-scene" ${can ? '' : 'disabled'} title="Um vídeo ou uma imagem do computador como nova cena (ocupa a tela toda)">${icon('download', 14)} Upload</button></div></div>
+      <p class="cs-note">${can ? 'Grave uma nova cena ou envie um vídeo / imagem (ocupa a tela toda). Ela entra no fim da aula e pode ser arrastada para qualquer posição, aqui ou na faixa “Cenas”. Uma imagem fica 5 s: arraste o fim dela na faixa “Cenas” para mudar a duração.'
+    : 'Novas cenas só podem ser adicionadas em aulas feitas por este app que ainda têm os arquivos originais.'}</p>
       <div class="cs-list" data-scenes>${c.scenes.map((sc, i) => {
     const s = c.sceneSpan(sc.id);
     return `<div class="cs-scene" draggable="true" data-scene="${sc.id}">
           <span class="cs-grip">${icon('grip', 14)}</span><span class="cs-num-badge">${i + 1}</span>
+          ${sc.kind ? `<span class="cs-kind" title="${sc.kind === 'image' ? 'Imagem' : 'Vídeo enviado'}">${icon(sc.kind === 'image' ? 'image' : 'film', 13)}</span>` : ''}
           <input type="text" class="cs-input" data-rename-scene="${sc.id}" value="${esc(sc.name)}" maxlength="40" />
           <span class="cs-dim">${s ? fmtClock(s.o1 - s.o0) : 'cortada'}</span>
           <button class="cs-x" data-scene-up="${i}" ${i === 0 ? 'disabled' : ''} title="Mover para cima">↑</button>
@@ -661,6 +750,21 @@ export class CutPanel {
     c.addItem('fx', value, 5);
   }
 
+  applyFormat(id) {
+    const c = this.c;
+    const f = this.formats().find((x) => x.id === id);
+    if (!f) return;
+    const scene = clone({ order: f.order, screen: f.screen, camera: f.camera });
+    const lay = c.selItem && c.selItem.lane === 'layout' ? c.selected : null;
+    if (lay) {
+      c.change(() => { Object.assign(lay, { name: f.name, base: f.base, scene }); });
+      this.render();
+      return;
+    }
+    c.addItem('layout', { name: f.name, base: f.base, scene }, 5);
+    this.render();
+  }
+
   bind() {
     const c = this.c;
     this.root.addEventListener('click', (e) => {
@@ -710,8 +814,10 @@ export class CutPanel {
         if (p.style && Array.isArray(c.selected.style && c.selected.style.gradient) && p.style.gradient && !Array.isArray(p.style.gradient)) {
           p.style.gradient = [p.style.gradient[0], p.style.gradient[1]];
         }
+        if (k === 'target' && p.target === 'camera') p.mode = 'fixed';
+        if (k === 'target' && p.target !== 'all' && !c.canLayerZoom()) { c.toast('Zoom só na tela ou só na câmera precisa de uma gravação feita a partir desta versão.'); return; }
         c.updateItem(ref, p, { rebuild: true });
-        if (['style.bg', 'style.stroke', 'style.border', 'style.glow', 'mode', 'border'].includes(k)) this.render(true);
+        if (['style.bg', 'style.stroke', 'style.border', 'style.glow', 'mode', 'border', 'target'].includes(k) || /^scene\.\w+\.(visible|shape|zoom|borderWidth)$/.test(k)) this.render(true);
       },
       commit: (fromClick) => {
         if (this.tab === 'audio' || this.tab === 'velocidade') {
@@ -838,6 +944,8 @@ export class CutPanel {
       if (ds) { c.removeSpeedRange(Number(ds.dataset.delSpeed)); return; }
       const sk = t.closest('[data-seek]');
       if (sk && sk.dataset.seek !== '') { c.seek(Number(sk.dataset.seek)); return; }
+      const fmt = t.closest('[data-format]');
+      if (fmt) { this.applyFormat(fmt.dataset.format); return; }
       const pz = t.closest('[data-pick-zoom]');
       if (pz) {
         c.selectItem({ lane: 'zoom', id: pz.dataset.pickZoom });
@@ -861,7 +969,30 @@ export class CutPanel {
       switch (act) {
         case 'add-text': this.addText(); break;
         case 'add-media': this.addMedia(); break;
-        case 'add-zoom': c.addZoom(); break;
+        case 'add-zoom': c.addZoom(t.closest('[data-act]').dataset.target || 'all'); break;
+        case 'swap-order': {
+          const it = c.selected;
+          if (it && it.scene) {
+            const o = it.scene.order || ['screen', 'camera'];
+            c.updateItem(c.selItem, { scene: { ...it.scene, order: [o[1], o[0]] } }, { commit: true });
+            this.render();
+          }
+          break;
+        }
+        case 'save-format': {
+          const it = c.selected;
+          const name = ($('#cs-format-name', this.body).value || '').trim().slice(0, 40);
+          if (!it || !it.scene) break;
+          if (!name) { c.toast('Dê um nome para o formato.'); $('#cs-format-name', this.body).focus(); break; }
+          const f = c.addLayoutFormat(this.orientation(), { name, base: it.base, ...clone(it.scene) });
+          if (f) {
+            c.updateItem(c.selItem, { name: f.name }, { commit: true });
+            c.toast(`Formato “${f.name}” cadastrado (também aparece no estúdio).`, 'ok');
+          }
+          this.render();
+          break;
+        }
+        case 'upload-scene': c.uploadScene(); break;
         case 'dup': c.duplicateItem(); break;
         case 'del': c.deleteItem(); this.render(); break;
         case 'to-playhead': {

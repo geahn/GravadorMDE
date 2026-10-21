@@ -1382,3 +1382,46 @@ body.in-gallery .title-actions .divider { display: none; }
 .cam-adj-foot span { flex: 1; }
 
 #beauty-body { padding: 8px 12px 12px; }
+
+/* rebuilt picture (another layout / zoom inside a layer) */
+.cut-player canvas.cut-recomp { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+.cut-player canvas.cut-recomp.on { opacity: 1; }
+
+/* transition library */
+.modal-trans { width: min(760px, 100%); min-height: 0; overflow: hidden; }
+.trans-body { padding: 4px 24px 20px; overflow: auto; min-height: 0; flex: 1; }
+.trans-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.trans-grid.small { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin: 6px 0 10px; }
+.trans-card {
+  position: relative; border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; cursor: pointer;
+  background: var(--panel-2); display: flex; flex-direction: column; transition: border-color .12s, transform .12s;
+}
+.trans-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.trans-card.on { border-color: var(--accent-hi); box-shadow: 0 0 0 1px var(--accent-hi); }
+.trans-thumb { aspect-ratio: 16 / 9; background: #000; }
+.trans-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: auto; }
+.trans-card b { font-size: 12.5px; font-weight: 600; padding: 7px 9px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trans-card small { font-size: 11px; color: var(--muted); padding: 1px 9px 8px; }
+.trans-del {
+  position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%; border: 0; cursor: pointer;
+  background: rgba(0,0,0,.65); color: #fff; display: none; place-items: center;
+}
+.trans-card:hover .trans-del { display: grid; }
+.trans-del:hover { background: var(--rec); }
+
+/* layout formats in the editor */
+.cs-head2 { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.cs-head-btns { display: flex; gap: 6px; }
+.cs-formats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 6px 0 10px; }
+.cs-formats.v { grid-template-columns: repeat(4, 1fr); }
+.cs-format {
+  padding: 0; border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden; cursor: pointer;
+  background: var(--panel-2); color: var(--muted); font-size: 11px; display: flex; flex-direction: column;
+}
+.cs-format svg { width: 100%; aspect-ratio: 16 / 9; display: block; }
+.cs-formats.v .cs-format svg { aspect-ratio: 9 / 16; }
+.cs-format span { padding: 4px 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs-format:hover { border-color: var(--accent); color: var(--text); }
+.cs-format.on { border-color: #22d3ee; color: var(--text); box-shadow: 0 0 0 1px #22d3ee; }
+.cs-kind { color: var(--muted); display: inline-grid; place-items: center; }
+#confirm-alt[hidden] { display: none; }

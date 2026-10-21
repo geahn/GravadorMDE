@@ -121,9 +121,9 @@
       </div>
 
       <div class="record-area" id="record-area">
-        <div class="rec-mode" id="rec-mode" title="O que salvar ao gravar">
-          <button data-v="final"><b>1 arquivo</b><small>vídeo final</small></button>
-          <button data-v="all"><b>3 arquivos</b><small>final + câmera + tela</small></button>
+        <div class="rec-mode" id="rec-mode" title="O que guardar depois de exportar (a câmera e a tela são sempre gravadas separadas, para dar para trocar o layout na edição)">
+          <button data-v="final" title="Ao exportar, fica só o vídeo final"><b>1 arquivo</b><small>vídeo final</small></button>
+          <button data-v="all" title="Ao exportar, você escolhe se guarda os 3 arquivos para editar depois"><b>3 arquivos</b><small>final + câmera + tela</small></button>
         </div>
         <button class="btn-record" id="btn-record" title="Iniciar gravação (Alt+Shift+R)">
           <span class="rec-dot"></span><span class="rec-label">Gravar</span>
@@ -305,7 +305,7 @@
           <div class="set-label"><b>Nivelar o áudio</b><small>Iguala trechos baixos e altos, evita estouros e deixa tudo em −16 LUFS (padrão de aulas e podcasts).</small></div>
           <input type="checkbox" class="switch" id="set-level" />
         </div>
-        <div class="set-row">
+        <div class="set-row" hidden>
           <div class="set-label"><b>Guardar também a gravação original</b><small>Desligado, o original vai para a Lixeira depois de exportar.</small></div>
           <input type="checkbox" class="switch" id="set-keep" />
         </div>
@@ -390,42 +390,10 @@
           </div>
         </div>
 
-        <h4 class="set-group" id="set-trans-anchor">Vídeo de transição</h4>
-        <p class="set-note">Um clipe de até 3 s (ex.: “alguns momentos depois”) que você insere entre dois trechos no editor.</p>
-        <div class="intro-card" data-slot="th">
-          <div class="intro-preview"><i data-icon="film" data-size="22"></i></div>
-          <div class="intro-info">
-            <span class="intro-slot">Horizontal · 16:9</span>
-            <b class="intro-name">Nenhuma transição definida</b>
-            <small class="intro-meta"></small>
-            <div class="intro-actions">
-              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
-              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
-              <div class="seg intro-image-dur" hidden>
-                <button data-v="1">1 s</button>
-                <button data-v="2">2 s</button>
-                <button data-v="3">3 s</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="intro-card" data-slot="tv">
-          <div class="intro-preview v"><i data-icon="film" data-size="20"></i></div>
-          <div class="intro-info">
-            <span class="intro-slot">Vertical · 9:16</span>
-            <b class="intro-name">Nenhuma transição definida</b>
-            <small class="intro-meta"></small>
-            <div class="intro-actions">
-              <button class="btn sm" data-intro-act="pick">Escolher arquivo…</button>
-              <button class="btn sm ghost" data-intro-act="remove" hidden>Remover</button>
-              <div class="seg intro-image-dur" hidden>
-                <button data-v="1">1 s</button>
-                <button data-v="2">2 s</button>
-                <button data-v="3">3 s</button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <h4 class="set-group" id="set-trans-anchor">Transições</h4>
+        <p class="set-note">Clipes curtos (até 3 s, ex.: “alguns momentos depois”) que você coloca entre dois trechos no editor: clique em <b>Transição</b> e escolha uma. Cadastre quantas quiser.</p>
+        <div class="trans-grid small" id="set-trans-list"></div>
+        <div class="intro-actions"><button class="btn sm" id="set-trans-add"><i data-icon="plus" data-size="14"></i> Adicionar transição…</button></div>
 
         </section>
         <section class="set-pane" data-pane="mde" hidden>
@@ -612,7 +580,7 @@
         <button class="btn sm" id="cut-remove" title="Remover o trecho selecionado (Del)"><i data-icon="scissors" data-size="15"></i> Remover seleção</button>
         <button class="btn sm" id="cut-trim-start" title="Remove tudo antes da agulha (Q)"><i data-icon="trimStart" data-size="15"></i> Cortar início</button>
         <button class="btn sm" id="cut-trim-end" title="Remove tudo depois da agulha (W)"><i data-icon="trimEnd" data-size="15"></i> Cortar final</button>
-        <button class="btn sm" id="cut-transition" title="Insere o vídeo de transição na emenda (ou na agulha) — T"><i data-icon="film" data-size="15"></i> Transição</button>
+        <button class="btn sm" id="cut-transition" title="Escolhe uma transição para a emenda (ou para a agulha) — T"><i data-icon="film" data-size="15"></i> Transição</button>
         <div class="pop-anchor">
           <button class="btn sm" id="cut-pauses" title="Encontra e remove silêncios longos"><i data-icon="wand" data-size="15"></i> Remover pausas</button>
           <div class="pop" id="cut-pause-pop" hidden>
@@ -683,6 +651,18 @@
     </div>
   </div>
 
+  <!-- ============================================================ transitions -->
+  <div class="backdrop" id="trans-modal" hidden>
+    <div class="modal modal-trans" role="dialog" aria-labelledby="trans-title">
+      <header class="modal-head"><div><h2 id="trans-title">Transições</h2><p id="trans-note">Clique em uma para colocá-la aqui.</p></div><button class="btn ghost icon" data-close title="Fechar"><i data-icon="x"></i></button></header>
+      <div class="trans-body"><div class="trans-grid" id="trans-grid"></div></div>
+      <footer class="modal-foot">
+        <button class="btn" id="trans-add"><i data-icon="plus" data-size="15"></i> Adicionar transição…</button>
+        <div class="foot-actions"><button class="btn danger-ghost" id="trans-remove" hidden>Tirar a transição</button><button class="btn" data-close>Fechar</button></div>
+      </footer>
+    </div>
+  </div>
+
   <!-- ============================================================ confirm -->
   <div class="backdrop" id="confirm-modal" hidden>
     <div class="modal modal-confirm" role="alertdialog" aria-labelledby="confirm-title">
@@ -691,6 +671,7 @@
         <span></span>
         <div class="foot-actions">
           <button class="btn" id="confirm-cancel">Cancelar</button>
+          <button class="btn" id="confirm-alt" hidden></button>
           <button class="btn primary" id="confirm-ok">OK</button>
         </div>
       </footer>

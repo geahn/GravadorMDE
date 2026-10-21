@@ -134,6 +134,8 @@ export class Compositor {
     this.liveRes = null; // (item) -> { img, w, h } | null
     this.liveCache = new Map();
     this.liveAlpha = new Map();
+    this.sceneTarget = null; // the scene last asked for (what the layout log records)
+    this.camOut = null; // processed camera picture for the separate camera file
   }
 
   // 1920x1080 (horizontal) or 1080x1920 (vertical).
@@ -220,6 +222,7 @@ export class Compositor {
   }
 
   setScene(scene, { animate = false, duration = 520 } = {}) {
+    this.sceneTarget = { order: scene.order || ['screen', 'camera'], screen: scene.screen, camera: scene.camera };
     this.order = scene.order || ['screen', 'camera'];
     const target = { screen: toDisplay(scene.screen), camera: toDisplay(scene.camera) };
     if (!animate || !this.display.screen) {
@@ -263,20 +266,117 @@ export class Compositor {
     const { ctx } = this;
     ctx.save();
     ctx.globalAlpha = 1;
-    if (this.bgCanvas) ctx.drawImage(this.bgCanvas, 0, 0);
-    else {
-      ctx.fillStyle = this.bgFill;
-      ctx.fillRect(0, 0, this.W, this.H);
-    }
+    this.drawBackground(ctx);
+    // The camera picture is treated once per frame (beauty, rotation) and
+    // shared by the layout and the separate camera file.
+    const camVisible = this.display.camera && this.display.camera.op > 0.004;
+    const cam = this.feeds.camera && (camVisible || this.camOut) ? this.processedCamera() : null;
     for (const name of this.order) {
       const d = this.display[name];
-      const feed = this.feeds[name];
+      const feed = name === 'camera' ? cam : this.feeds[name];
       if (!d || !feed) continue;
-      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none', name === 'camera' ? this.camRotate : 0, name === 'camera' ? this.beauty : null);
+      this.drawLayer(d, feed, name === 'camera' && this.mirror, this.crops[name], name === 'camera' ? this.camFilter : 'none');
     }
     this.drawLogo();
     this.drawLive(now);
     ctx.restore();
+    if (this.camOut && cam) this.drawCamOut(cam);
+  }
+
+  drawBackground(ctx) {
+    if (this.bgCanvas) ctx.drawImage(this.bgCanvas, 0, 0, this.W, this.H);
+    else {
+      ctx.fillStyle = this.bgFill;
+      ctx.fillRect(0, 0, this.W, this.H);
+    }
+  }
+
+  // The background alone, as a picture (for the layout log of the recording).
+  backgroundPlate(type = 'image/jpeg') {
+    const c = document.createElement('canvas');
+    c.width = this.W;
+    c.height = this.H;
+    const x = c.getContext('2d');
+    if (this.bgCanvas) x.drawImage(this.bgCanvas, 0, 0);
+    else {
+      let fill = this.bgFill;
+      if (typeof fill !== 'string') {
+        fill = x.createLinearGradient(0, 0, this.W, this.H);
+        fill.addColorStop(0, this.bg[0]);
+        fill.addColorStop(1, this.bg[1]);
+      }
+      x.fillStyle = fill;
+      x.fillRect(0, 0, this.W, this.H);
+    }
+    return c.toDataURL(type, 0.92);
+  }
+
+  // Camera picture after beauty and rotation: { image, w, h } (a Feed-like object).
+  processedCamera() {
+    const f = this.feeds.camera;
+    let img = f && f.image;
+    let w = f ? f.w : 0;
+    let h = f ? f.h : 0;
+    if (!img || !w || !h) return { image: null, w, h };
+    if (this.beauty) img = this.beautify(img, w, h, this.beauty);
+    if (this.camRotate) {
+      img = this.rotated(img, w, h, this.camRotate);
+      w = img.width;
+      h = img.height;
+    }
+    return { image: img, w, h };
+  }
+
+  // ---- the separate camera file: the camera as it looks in the video (filter, mirror, beauty, rotation)
+  startCamOutput(fps) {
+    this.stopCamOutput();
+    const canvas = document.createElement('canvas');
+    canvas.width = 2;
+    canvas.height = 2;
+    const out = { canvas, ctx: canvas.getContext('2d', { alpha: false }), writer: null, generator: null, track: null };
+    if ('MediaStreamTrackGenerator' in window && 'VideoFrame' in window) {
+      out.generator = new MediaStreamTrackGenerator({ kind: 'video' });
+      out.writer = out.generator.writable.getWriter();
+      out.track = out.generator;
+    } else {
+      out.track = canvas.captureStream(fps).getVideoTracks()[0];
+    }
+    this.camOut = out;
+    return out.track;
+  }
+
+  drawCamOut(cam) {
+    const o = this.camOut;
+    if (!cam.image) return;
+    // even size, at most 1920 wide (what the encoder likes)
+    const k = Math.min(1, 1920 / cam.w, 1920 / cam.h);
+    const w = Math.max(2, Math.round((cam.w * k) / 2) * 2);
+    const h = Math.max(2, Math.round((cam.h * k) / 2) * 2);
+    if (o.canvas.width !== w || o.canvas.height !== h) { o.canvas.width = w; o.canvas.height = h; }
+    const x = o.ctx;
+    x.save();
+    x.filter = this.camFilter && this.camFilter !== 'none' ? this.camFilter : 'none';
+    if (this.mirror) { x.translate(w, 0); x.scale(-1, 1); }
+    x.drawImage(cam.image, 0, 0, w, h);
+    x.restore();
+    o.fresh = true;
+  }
+
+  pushCamFrame() {
+    const o = this.camOut;
+    if (!o || !o.writer || !o.fresh) return;
+    if (o.writer.desiredSize !== null && o.writer.desiredSize <= 0) return;
+    const frame = new VideoFrame(o.canvas, { timestamp: Math.round(performance.now() * 1000) });
+    o.writer.write(frame).catch(() => frame.close());
+  }
+
+  stopCamOutput() {
+    const o = this.camOut;
+    if (!o) return;
+    this.camOut = null;
+    if (o.writer) o.writer.close().catch(() => {});
+    if (o.generator) o.generator.stop();
+    else if (o.track) o.track.stop();
   }
 
   // Live overlays: each one is rendered once to its own small canvas and
@@ -337,7 +437,7 @@ export class Compositor {
     return this.beautyFx.process(img, w, h, b);
   }
 
-  drawLayer(d, feed, mirror, crop = null, filter = 'none', rotate = 0, beauty = null) {
+  drawLayer(d, feed, mirror, crop = null, filter = 'none') {
     if (d.op <= 0.004 || d.w < 2 || d.h < 2) return;
     const { ctx } = this;
     const r = Math.max(0, Math.min(d.r, d.w / 2, d.h / 2));
@@ -359,21 +459,22 @@ export class Compositor {
 
     ctx.save();
     ctx.clip(path);
-    let img = feed.image;
-    let fw = feed.w;
-    let fh = feed.h;
-    if (img && beauty) img = this.beautify(img, fw, fh, beauty);
-    if (img && rotate && fw && fh) {
-      img = this.rotated(img, fw, fh, rotate);
-      fw = img.width;
-      fh = img.height;
-    }
+    const img = feed.image;
+    const fw = feed.w;
+    const fh = feed.h;
     const ox = crop ? fw * crop.x : 0;
     const oy = crop ? fh * crop.y : 0;
     const sw = crop ? fw * crop.w : fw;
     const sh = crop ? fh * crop.h : fh;
     if (img && sw && sh) {
       const c = cropFor(d, sw, sh);
+      if (d.win && d.win.z > 1.0001) {
+        // a zoom inside the layer (editor: "zoom na tela / na câmera")
+        c.sx += d.win.x0 * c.vw;
+        c.sy += d.win.y0 * c.vh;
+        c.vw /= d.win.z;
+        c.vh /= d.win.z;
+      }
       if (filter && filter !== 'none') ctx.filter = filter;
       if (mirror) {
         ctx.translate(d.x * 2 + d.w, 0);

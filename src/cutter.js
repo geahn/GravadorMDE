@@ -14,6 +14,7 @@ import { zoomState, followPath, zoompanFilter, ZOOM_DEFAULT } from './zoom.js';
 import { cssFilter, vignetteCss, ffmpegChain, isNeutral } from './fx.js';
 import { drawItem, itemSize, rasterize, stickerUrl, mergeStyle } from './textstyles.js';
 import { CutPanel } from './cutpanel.js';
+import { Compositor, cropFor } from './compositor.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -130,13 +131,16 @@ export class Cutter {
     this.introApplied = !!project.introApplied;
     this.intro = this.introApplied ? null : intro;
     this.useIntro = !!this.intro && enabled;
-    this.trans = this.getTransition(project);
+    this.transList = this.getTransitions(project) || [];
+    this.clipUrl = null;
     this.audioDelay = Number.isFinite(project.audioDelay) ? project.audioDelay : this.getAudioDelay();
     this.fitMode = true;
     this.speedIdx = 0;
     this.speeds = Array.isArray(project.speeds) ? clone(project.speeds) : [];
     this.speed = clamp(Number(project.speed) || 1, 0.1, 16);
     this.zooms = Array.isArray(project.zooms) ? clone(project.zooms) : [];
+    this.layouts = Array.isArray(project.layouts) ? clone(project.layouts) : [];
+    this.layoutLog = Array.isArray(project.layoutLog) && project.layoutLog.length ? project.layoutLog : null;
     this.overlays = Array.isArray(project.overlays) ? clone(project.overlays) : [];
     this.fx = Array.isArray(project.fx) ? clone(project.fx) : [];
     this.fxGlobal = project.fxGlobal ? clone(project.fxGlobal) : null;
@@ -163,9 +167,9 @@ export class Cutter {
 
     this.videoUrl = null;
     for (const v of [...this.players, this.thumbVideo, this.audio]) v.src = project.url;
-    if (this.trans) this.clip.src = this.trans.url;
-    else this.clip.removeAttribute('src');
+    this.clip.removeAttribute('src');
     for (const v of [...this.players, this.clip, this.audio]) v.playbackRate = 1;
+    this.setupRecomp(project);
     const A = this.players[0];
     await new Promise((res) => {
       if (A.readyState >= 1) res();
@@ -175,7 +179,7 @@ export class Cutter {
     if (!this.duration && Number.isFinite(A.duration)) this.duration = A.duration;
     this.scenes = this.sanitizeScenes(project.scenes);
     this.removed = this.normalize(project.removed || []);
-    this.inserts = [...(project.inserts || [])];
+    this.inserts = this.normInserts(project.inserts || []);
     this.applyDelay();
     this.buildSeq();
     this.layoutLanes();
@@ -238,6 +242,7 @@ export class Cutter {
       v.load();
     }
     this.dropOverlayMedia();
+    this.releaseRecomp();
     this.closePops();
     this.el.hidden = true;
     document.body.classList.remove('editing');
@@ -260,6 +265,7 @@ export class Cutter {
       v.removeAttribute('src');
       v.load();
     }
+    this.releaseRecomp();
     this.dropOverlayMedia();
   }
 
@@ -267,7 +273,8 @@ export class Cutter {
     if (!this.p) return;
     for (const v of [this.thumbVideo, this.audio]) v.src = this.p.url;
     for (const v of this.players) v.src = this.videoUrl || this.p.url;
-    if (this.trans) this.clip.src = this.trans.url;
+    this.clipUrl = null;
+    this.restoreRecomp();
     this.players[0].addEventListener('loadedmetadata', () => this.seek(this.t), { once: true });
     this.renderPreview();
   }
@@ -281,10 +288,10 @@ export class Cutter {
       if (!intro) this.useIntro = false;
       else if (changed) this.useIntro = enabled;
     }
-    const trans = this.getTransition(this.p);
-    if ((trans && trans.url) !== (this.trans && this.trans.url)) {
-      this.trans = trans;
-      if (trans) this.clip.src = trans.url;
+    const list = this.getTransitions(this.p) || [];
+    if (JSON.stringify(list.map((x) => x.id)) !== JSON.stringify(this.transList.map((x) => x.id))) {
+      this.transList = list;
+      this.clipUrl = null;
       this.buildSeq();
       this.resize();
     }
@@ -400,8 +407,29 @@ export class Cutter {
     return out.filter(([a, b]) => b - a >= 1 / this.fps);
   }
 
-  transDur() {
-    return this.trans ? Math.min(3, this.trans.duration) : 0;
+  // Transitions: each insert is { at: source time, tr: id in the library (null = the first one) }.
+  normInserts(list) {
+    return (list || []).map((x) => (typeof x === 'number' ? { at: x, tr: null } : { at: Number(x && x.at), tr: (x && x.tr) || null }))
+      .filter((x) => Number.isFinite(x.at));
+  }
+
+  transClip(tr) {
+    return this.transList.find((c) => c.id === tr) || this.transList[0] || null;
+  }
+
+  // The clips used, for the export: { id: clip }.
+  usedTransitions() {
+    const out = {};
+    for (const it of this.seq) if (it.t === 'x') { const c = this.transClip(it.tr); if (c) out[c.id] = c; }
+    return Object.keys(out).length ? out : null;
+  }
+
+  // Loads the clip of a transition into the transition player.
+  useClip(it) {
+    const c = it && this.transClip(it.tr);
+    if (!c || this.clipUrl === c.url) return;
+    this.clipUrl = c.url;
+    this.clip.src = c.url;
   }
 
   speedAt(src) {
@@ -413,8 +441,8 @@ export class Cutter {
   // Scenes play in their order; each one's kept pieces in source order.
   buildSeq() {
     const half = 0.5 / this.fps;
-    const T = this.transDur();
-    const ins = [...this.inserts].sort((x, y) => x - y);
+    const ins = [...this.inserts].sort((x, y) => x.at - y.at);
+    const insAt = ins.map((x) => x.at);
     const bounds = [...new Set(this.speeds.flatMap(([a, b]) => [a, b]))].sort((x, y) => x - y);
     const kept = this.keptRanges();
     const items = [];
@@ -424,7 +452,7 @@ export class Cutter {
         const a0 = Math.max(ka, sc.start);
         const b0 = Math.min(kb, sc.end);
         if (b0 - a0 < 1 / this.fps) continue;
-        const cuts = [...ins, ...bounds].filter((p) => p > a0 + half && p < b0 - half).sort((x, y) => x - y)
+        const cuts = [...insAt, ...bounds].filter((p) => p > a0 + half && p < b0 - half).sort((x, y) => x - y)
           .filter((p, i, arr) => i === 0 || p - arr[i - 1] > half);
         let start = a0;
         for (const p of [...cuts, b0]) {
@@ -433,8 +461,11 @@ export class Cutter {
           const len = (p - start) / sp;
           items.push({ t: 's', a: start, b: p, sp, scene: sc.id, o0: o, o1: o + len });
           o += len;
-          if (T && ins.some((x) => Math.abs(x - p) < half)) {
-            items.push({ t: 'x', at: p, o0: o, o1: o + T });
+          const hit = ins.find((x) => Math.abs(x.at - p) < half);
+          const clip = hit && this.transClip(hit.tr);
+          if (clip) {
+            const T = Math.min(3, clip.duration || 2);
+            items.push({ t: 'x', at: p, tr: clip.id, o0: o, o1: o + T });
             o += T;
           }
           start = p;
@@ -442,8 +473,8 @@ export class Cutter {
       }
     }
     while (items.length && items[items.length - 1].t === 'x') {
-      o -= T;
-      items.pop();
+      const x = items.pop();
+      o -= x.o1 - x.o0;
     }
     this.seq = items;
     this.outDur = o;
@@ -546,6 +577,7 @@ export class Cutter {
       speeds: this.speeds,
       speed: this.speed,
       zooms: this.zooms,
+      layouts: this.layouts,
       overlays: this.overlays,
       fx: this.fx,
       fxGlobal: this.fxGlobal,
@@ -565,6 +597,7 @@ export class Cutter {
   }
 
   afterEdit(t) {
+    this.layoutsVersion = (this.layoutsVersion || 0) + 1;
     this.buildSeq();
     this.layoutLanes();
     const keepFit = this.fitMode;
@@ -630,6 +663,7 @@ export class Cutter {
       speeds: this.speeds,
       speed: this.speed,
       zooms: this.zooms,
+      layouts: this.layouts,
       overlays: this.overlays,
       fx: this.fx,
       fxGlobal: this.fxGlobal,
@@ -646,7 +680,7 @@ export class Cutter {
       const b = Math.min(ob, it.o1);
       if (b - a <= 1e-6) continue;
       if (it.t === 's') removed.push([this.snap(it.a + (a - it.o0) * it.sp), this.snap(it.a + (b - it.o0) * it.sp)]);
-      else inserts = inserts.filter((x) => Math.abs(x - it.at) > 0.5 / this.fps);
+      else inserts = inserts.filter((x) => Math.abs(x.at - it.at) > 0.5 / this.fps);
     }
     this.apply({ removed, inserts }, message, oa);
   }
@@ -684,26 +718,42 @@ export class Cutter {
     this.apply({ removed: this.removed.filter((_, i) => i !== seam.removedIdx), inserts: this.inserts }, `Trecho de ${fmtLen(b - a)} restaurado.`, seam.o);
   }
 
-  toggleTransition(seam) {
-    if (!this.trans) {
-      this.toast('Defina primeiro o vídeo de transição em Configurações.', 'info', 6000, { label: 'Configurar', onClick: () => this.onSetupTransition() });
-      return;
-    }
+  // Puts transition `tr` at a seam (or replaces the one there); tr = null removes it.
+  setTransition(seam, tr) {
     const half = 0.5 / this.fps;
-    const has = this.inserts.some((x) => Math.abs(x - seam.at) < half);
-    const inserts = has ? this.inserts.filter((x) => Math.abs(x - seam.at) >= half) : [...this.inserts, seam.at];
-    this.apply({ removed: this.removed, inserts }, null, seam.o ?? this.t);
+    const rest = this.inserts.filter((x) => Math.abs(x.at - seam.at) >= half);
+    const inserts = tr ? [...rest, { at: seam.at, tr }] : rest;
+    this.apply({ removed: this.removed, inserts }, tr ? null : 'Transição removida.', seam.o ?? this.t);
   }
 
-  // "Transição" button / T key: on a seam toggles it, elsewhere splits at the playhead.
+  // Opens the transition library for a seam: one click applies.
+  openTransitions(seam) {
+    const half = 0.5 / this.fps;
+    const cur = this.inserts.find((x) => Math.abs(x.at - seam.at) < half);
+    const curClip = cur ? this.transClip(cur.tr) : null;
+    this.pause();
+    this.pickTransition({
+      current: curClip ? curClip.id : null,
+      has: !!cur,
+      onPick: (id) => this.setTransition(seam, id),
+      onRemove: () => this.setTransition(seam, null),
+    });
+  }
+
+  toggleTransition(seam) {
+    this.openTransitions(seam);
+  }
+
+  // "Transição" button / T key: on a seam (or the selection's start) opens the
+  // library for it, elsewhere it splits at the playhead.
   transitionAtPlayhead() {
     const near = this.seams.find((s) => Math.abs(s.o - this.t) * this.pps < 8 || Math.abs(s.o - this.t) < 0.05);
     if (near) {
-      this.toggleTransition(near);
+      this.openTransitions(near);
       return;
     }
     const src = this.srcOf(this.t);
-    if (src != null) this.toggleTransition({ at: this.snap(src), o: this.t });
+    if (src != null) this.openTransitions({ at: this.snap(src), o: this.t });
   }
 
   undo() {
@@ -740,6 +790,24 @@ export class Cutter {
     const sc = this.scenes.find((s) => s.id === id);
     if (!sc) return;
     this.apply({ removed: [...this.removed, [sc.start, sc.end]], inserts: this.inserts }, `“${sc.name}” removida. Ctrl+Z desfaz.`);
+  }
+
+  // Length on screen of a picture scene (its file is long; the rest is cut).
+  setImageSceneLen(id, outLen) {
+    const sc = this.scenes.find((q) => q.id === id);
+    if (!sc) return;
+    const sp = this.speedAt(sc.start + 0.01);
+    const full = sc.end - sc.start;
+    const len = clamp(this.snap(sc.start + Math.max(0.5, outLen) * sp) - sc.start, 0.5, full);
+    const rest = this.removed.filter(([a, b]) => b <= sc.start + 1e-3 || a >= sc.end - 1e-3);
+    if (len < full - 1 / this.fps) rest.push([sc.start + len, sc.end]);
+    this.removed = this.normalize(rest);
+    this.buildSeq();
+    this.layoutLanes();
+    if (!this.fitMode) this.setPps(this.pps, this.scroller.scrollLeft);
+    else this.setPps(this.fitPps(), 0);
+    this.requestDraw();
+    this.renderSummary();
   }
 
   // ---------------------------------------------------------------- speed
@@ -781,7 +849,7 @@ export class Cutter {
   // ---------------------------------------------------------------- items (zoom / overlays / filters)
 
   listOf(lane) {
-    return lane === 'zoom' ? this.zooms : lane === 'fx' ? this.fx : this.overlays;
+    return lane === 'zoom' ? this.zooms : lane === 'layout' ? this.layouts : lane === 'fx' ? this.fx : this.overlays;
   }
 
   findItem(ref) {
@@ -794,9 +862,11 @@ export class Cutter {
     return this.findItem(this.selItem);
   }
 
-  selectItem(ref) {
+  // keepSel: an item just made from the selection keeps the selection, so the
+  // next effect goes to the same stretch.
+  selectItem(ref, { keepSel = false } = {}) {
     this.selItem = ref;
-    this.sel = null;
+    if (!keepSel) this.sel = null;
     this.focus = -1;
     this.panel.showFor(ref);
     this.renderAll();
@@ -811,14 +881,16 @@ export class Cutter {
 
   addItem(lane, data, dur = 3) {
     const { o0, d } = this.newSpan(dur);
-    const item = { id: uid(lane === 'zoom' ? 'z' : lane === 'fx' ? 'f' : 'o'), at: this.srcAtOut(o0), dur: Math.max(0.2, d), ...data };
+    const item = { id: uid({ zoom: 'z', fx: 'f', layout: 'l' }[lane] || 'o'), at: this.srcAtOut(o0), dur: Math.max(0.2, d), ...data };
     this.change(() => { this.listOf(lane).push(item); });
-    this.selectItem({ lane, id: item.id });
+    this.selectItem({ lane, id: item.id }, { keepSel: true });
     return item;
   }
 
-  addZoom() {
-    const it = this.addItem('zoom', { ...ZOOM_DEFAULT, mode: this.cursor ? 'follow' : 'fixed' }, 3);
+  addZoom(target = 'all') {
+    const tg = target !== 'all' && !this.canLayerZoom() ? 'all' : target;
+    const follow = !!this.cursor && tg !== 'camera';
+    const it = this.addItem('zoom', { ...ZOOM_DEFAULT, target: tg, mode: follow ? 'follow' : 'fixed' }, 3);
     if (it && it.mode === 'follow') this.toast('Zoom que segue o mouse. Troque para “Ponto fixo” no painel se preferir.', 'ok', 4000);
   }
 
@@ -833,6 +905,7 @@ export class Cutter {
     this.beginEdit();
     Object.assign(it, patch);
     if (ref.lane === 'zoom') this.paths.delete(it.id);
+    if (ref.lane === 'layout') this.layoutsVersion = (this.layoutsVersion || 0) + 1;
     if (rebuild) this.layoutLanes();
     this.requestDraw();
     this.renderPreview();
@@ -882,20 +955,23 @@ export class Cutter {
   }
 
   // Zooms as the export sees them: sorted, never overlapping, with mouse paths.
-  resolvedZooms() {
-    const list = this.zooms.map((z) => ({ ...z, ...this.span(z) })).sort((a, b) => a.o0 - b.o0);
+  // target: 'all' (the whole picture), 'screen' or 'camera' (inside that layer).
+  resolvedZooms(target = 'all') {
+    const list = this.zooms.filter((z) => (z.target || 'all') === target).map((z) => ({ ...z, ...this.span(z) })).sort((a, b) => a.o0 - b.o0);
     let end = 0;
     const out = [];
     for (const z of list) {
       const o0 = Math.max(z.o0, end);
       if (z.o1 - o0 < 0.15) continue;
       const r = { ...z, o0 };
-      if (z.mode === 'follow' && this.cursor) {
-        const key = `${this.seqVersion}|${o0.toFixed(3)}|${z.o1.toFixed(3)}|${z.scale}`;
+      if (target === 'camera') r.mode = 'fixed';
+      if (r.mode === 'follow' && this.cursor) {
+        const key = `${this.seqVersion}|${o0.toFixed(3)}|${z.o1.toFixed(3)}|${z.scale}|${target}|${this.layoutsVersion || 0}`;
         const cached = this.paths.get(z.id);
         if (cached && cached.key === key) r.path = cached.path;
         else {
-          r.path = followPath(r, (s) => this.cursorAt(s), (t) => this.srcOf(t));
+          const at = target === 'screen' ? (s) => this.screenCursorAt(s) : (s) => this.cursorAt(s);
+          r.path = followPath(r, at, (t) => this.srcOf(t));
           this.paths.set(z.id, { key, path: r.path });
         }
       }
@@ -931,6 +1007,400 @@ export class Cutter {
       if (t >= o0 && t < o1) return f;
     }
     return this.fxGlobal;
+  }
+
+  // ---------------------------------------------------------------- other layouts (rebuilt from the camera and screen files)
+
+  setupRecomp(project) {
+    const src = {};
+    for (const t of project.tracks || []) if (t && t.source) src[t.key] = t.source;
+    this.trackSrc = src;
+    this.trackSize = {};
+    this.layoutsVersion = 0;
+    if (!this.rc) {
+      const canvas = document.createElement('canvas');
+      canvas.className = 'cut-recomp';
+      this.zoomWrap.appendChild(canvas);
+      const vids = {};
+      const box = document.createElement('div');
+      box.hidden = true;
+      this.el.appendChild(box);
+      for (const k of ['camera', 'screen']) {
+        const v = document.createElement('video');
+        v.muted = true;
+        v.preload = 'auto';
+        v.playsInline = true;
+        v.addEventListener('seeked', () => { if (!this.playing) this.renderPreview(); });
+        v.addEventListener('loadeddata', () => { if (!this.playing) this.renderPreview(); });
+        box.appendChild(v);
+        vids[k] = v;
+      }
+      this.rc = { canvas, comp: new Compositor(canvas), vids, bg: new Map(), on: false };
+    }
+    this.rc.comp.setSize(project.width || 1920, project.height || 1080);
+    this.rc.bgKey = null;
+    this.rc.urls = {};
+    for (const k of ['camera', 'screen']) {
+      const v = this.rc.vids[k];
+      v.removeAttribute('src');
+      v.load();
+      if (!src[k]) continue;
+      this.api.media.probe(src[k]).then((info) => { if (this.p === project && info) this.trackSize[k] = { w: info.width, h: info.height }; }).catch(() => {});
+      this.api.media.previewVideo(src[k]).then((url) => {
+        if (this.p !== project || !url) return;
+        this.rc.urls[k] = url;
+        v.src = url;
+      }).catch(() => {});
+    }
+    this.rc.canvas.classList.remove('on');
+  }
+
+  releaseRecomp() {
+    if (!this.rc) return;
+    for (const v of Object.values(this.rc.vids)) { v.pause(); v.removeAttribute('src'); v.load(); }
+  }
+
+  restoreRecomp() {
+    if (!this.rc) return;
+    for (const [k, url] of Object.entries(this.rc.urls || {})) this.rc.vids[k].src = url;
+  }
+
+  // Layouts can be changed where there are separate camera / screen files.
+  canRecompose() {
+    return !!(this.trackSrc && (this.trackSrc.camera || this.trackSrc.screen));
+  }
+
+  // Zooms inside one layer need to know where the layers were (the layout log).
+  canLayerZoom() {
+    return this.canRecompose() && !!this.layoutLog;
+  }
+
+  // Layout log entry in force at a source time.
+  logAt(src) {
+    const L = this.layoutLog;
+    if (!L) return null;
+    let best = L[0];
+    for (const e of L) { if (e.t <= src + 1e-3) best = e; else break; }
+    return best;
+  }
+
+  activeLayout(t) {
+    for (let i = this.layouts.length - 1; i >= 0; i--) {
+      const l = this.layouts[i];
+      const { o0, o1 } = this.span(l);
+      if (t >= o0 && t < o1) return l;
+    }
+    return null;
+  }
+
+  layerZoomItem(target, t) {
+    for (const z of this.zooms) {
+      if ((z.target || 'all') !== target) continue;
+      const { o0, o1 } = this.span(z);
+      if (t >= o0 && t < o1) return z;
+    }
+    return null;
+  }
+
+  // What the picture is at timeline time t when it is rebuilt from the
+  // separate files (null = the recorded picture is used as it is).
+  recompAt(t) {
+    if (!this.canRecompose()) return null;
+    const it = this.seq[this.itemIndexAt(t)];
+    if (!it || it.t !== 's') return null;
+    const src = it.a + clamp((t - it.o0) * it.sp, 0, it.b - it.a);
+    const entry = this.logAt(src);
+    if (entry && entry.media) return null; // a scene sent from a file
+    const lay = this.activeLayout(t);
+    const zScreen = this.layoutLog ? this.layerZoomItem('screen', t) : null;
+    const zCam = this.layoutLog ? this.layerZoomItem('camera', t) : null;
+    if (!lay && !zScreen && !zCam) return null;
+    const scene = lay ? lay.scene : entry && entry.scene;
+    if (!scene) return null;
+    return { src, it, scene, entry, lay, zScreen, zCam };
+  }
+
+  sceneLayer(scene, name) {
+    return scene && scene[name] ? scene[name] : null;
+  }
+
+  // Mouse over the screen, as fractions of what the screen layer shows (for zooms inside it).
+  screenCursorAt(src) {
+    const c = this.cursor;
+    if (!c || !c.length) return null;
+    let i = 0;
+    let lo = 0;
+    let hi = c.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (c[mid][0] <= src) lo = mid; else hi = mid; }
+    i = src - c[lo][0] < c[hi][0] - src ? lo : hi;
+    const smp = c[i];
+    if (!smp || smp.length < 5) return null;
+    const entry = this.logAt(src);
+    const t = this.outOfSrc(src);
+    const lay = t != null ? this.activeLayout(t) : null;
+    const L = this.sceneLayer(lay ? lay.scene : entry && entry.scene, 'screen');
+    const size = (entry && entry.size && entry.size.screen) || this.trackSize.screen;
+    if (!L || !size) return null;
+    const v = cropFor(L, size.w, size.h);
+    return [clamp((smp[3] * size.w - v.sx) / v.vw, 0, 1), clamp((smp[4] * size.h - v.sy) / v.vh, 0, 1)];
+  }
+
+  bgFor(entry) {
+    const url = entry && entry.bgUrl ? entry.bgUrl : null;
+    if (url) return url;
+    if (!this.studioBg) this.studioBg = (this.getStudioBg && this.getStudioBg().url) || null;
+    return this.studioBg;
+  }
+
+  bgImage(url) {
+    if (!url) return null;
+    let r = this.rc.bg.get(url);
+    if (!r) {
+      r = { img: new Image(), ok: false };
+      r.img.onload = () => { r.ok = true; this.rc.bgKey = null; this.renderPreview(); };
+      r.img.src = url;
+      this.rc.bg.set(url, r);
+    }
+    return r.ok ? r.img : null;
+  }
+
+  // Draws the rebuilt picture for time t into the preview canvas.
+  drawRecomp(st, t) {
+    const { comp, vids } = this.rc;
+    const bgUrl = this.bgFor(st.entry);
+    const img = this.bgImage(bgUrl);
+    const key = img ? bgUrl : 'none';
+    if (this.rc.bgKey !== key) {
+      this.rc.bgKey = key;
+      comp.setBackground(['#000000', '#000000']);
+      comp.setBackgroundImage(img || null);
+    }
+    comp.mirror = false;
+    comp.camRotate = 0;
+    comp.beauty = null;
+    comp.camFilter = 'none';
+    const crops = (st.entry && st.entry.crops) || { screen: this.p.screenCrop || null, camera: null };
+    comp.setCrop('screen', crops.screen);
+    comp.setCrop('camera', crops.camera);
+    for (const k of ['camera', 'screen']) {
+      const v = vids[k];
+      const ready = this.trackSrc[k] && v.readyState >= 2 && v.videoWidth;
+      comp.setFeed(k, { image: ready ? v : null, w: ready ? v.videoWidth : 0, h: ready ? v.videoHeight : 0 });
+    }
+    comp.setScene(st.scene);
+    const zSel = this.selItem && this.selItem.lane === 'zoom' && !this.playing ? this.selected : null;
+    for (const [k, z] of [['screen', st.zScreen], ['camera', st.zCam]]) {
+      const d = comp.display[k];
+      if (!d) continue;
+      if (z && !(zSel && zSel.id === z.id)) {
+        const zs = zoomState(this.resolvedZooms(k), t);
+        d.win = zs.z > 1.0001 ? { z: zs.z, x0: zs.x0, y0: zs.y0 } : null;
+      } else d.win = null;
+    }
+    comp.draw();
+  }
+
+  // Keeps the camera / screen players on the timeline while a rebuilt stretch shows.
+  syncRecomp(st) {
+    const { vids } = this.rc;
+    for (const k of ['camera', 'screen']) {
+      const v = vids[k];
+      if (!v.src) continue;
+      if (!st) { if (!v.paused) v.pause(); continue; }
+      const want = this.vt(st.src);
+      if (this.playing) {
+        const r = clamp(this.rateOf(st.it), 0.0625, 16);
+        if (v.playbackRate !== r) v.playbackRate = r;
+        if (Math.abs(v.currentTime - want) > 0.25) v.currentTime = want;
+        if (v.paused) v.play().catch(() => {});
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(v.currentTime - want) > 0.5 / this.fps && !v.seeking) v.currentTime = want;
+      }
+    }
+  }
+
+  renderRecomp(t) {
+    if (!this.rc) return;
+    const st = this.recompAt(t);
+    this.syncRecomp(st);
+    this.rc.canvas.classList.toggle('on', !!st);
+    this.rc.state = st;
+    if (st) this.drawRecomp(st, t);
+  }
+
+  // Layer box (fractions of the frame) of `target` where a zoom item starts.
+  zoomBox(zm) {
+    if (!zm || (zm.target || 'all') === 'all') return { x: 0, y: 0, w: 1, h: 1 };
+    const { o0 } = this.span(zm);
+    const st = this.recompAt(Math.min(this.outDur, o0 + 0.01));
+    const L = st && this.sceneLayer(st.scene, zm.target);
+    const W = this.p.width || 1920;
+    const H = this.p.height || 1080;
+    if (!L) return { x: 0, y: 0, w: 1, h: 1 };
+    return { x: L.x / W, y: L.y / H, w: L.w / W, h: L.h / H };
+  }
+
+  // ---- export: the rebuilt stretches, ready for FFmpeg (times on the final file)
+  async exportRecomp(offset) {
+    if (!this.canRecompose()) return [];
+    const fps = this.fps;
+    const W = this.p.width || 1920;
+    const H = this.p.height || 1080;
+    // every moment where what is rebuilt could change
+    const cuts = new Set([0, this.outDur]);
+    for (const it of this.seq) { cuts.add(it.o0); cuts.add(it.o1); }
+    for (const x of [...this.layouts, ...this.zooms.filter((z) => (z.target || 'all') !== 'all')]) {
+      const { o0, o1 } = this.span(x);
+      cuts.add(o0);
+      cuts.add(o1);
+    }
+    if (this.layoutLog) {
+      for (const it of this.seq) {
+        if (it.t !== 's') continue;
+        for (const e of this.layoutLog) if (e.t > it.a && e.t < it.b) cuts.add(it.o0 + (e.t - it.a) / it.sp);
+      }
+    }
+    const pts = [...cuts].map((v) => Math.round(v * fps) / fps).sort((a, b) => a - b).filter((v, i, a) => i === 0 || v - a[i - 1] > 0.5 / fps);
+    const spans = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      if (b - a < 1 / fps) continue;
+      const st = this.recompAt((a + b) / 2);
+      if (!st) continue;
+      const key = JSON.stringify([st.scene, st.entry && st.entry.bgUrl, st.entry && st.entry.crops]);
+      const last = spans[spans.length - 1];
+      if (last && last.key === key && Math.abs(last.o1 - a) < 0.5 / fps) last.o1 = b;
+      else spans.push({ key, o0: a, o1: b, st });
+    }
+    const out = [];
+    for (const sp of spans) out.push(await this.exportSpan(sp, offset, W, H));
+    return out;
+  }
+
+  async trackSizeOf(k) {
+    if (this.trackSize[k] && this.trackSize[k].w) return this.trackSize[k];
+    const info = await this.api.media.probe(this.trackSrc[k]).catch(() => null);
+    if (info && info.width) this.trackSize[k] = { w: info.width, h: info.height };
+    return this.trackSize[k] || null;
+  }
+
+  async loadImage(url) {
+    if (!url) return null;
+    const img = new Image();
+    await new Promise((res) => { img.onload = res; img.onerror = res; img.src = url; });
+    return img.naturalWidth ? img : null;
+  }
+
+  async exportSpan(sp, offset, W, H) {
+    const { st } = sp;
+    const scene = st.scene;
+    const order = scene.order || ['screen', 'camera'];
+    const crops = (st.entry && st.entry.crops) || { screen: this.p.screenCrop || null, camera: null };
+    // pieces of the source inside the span
+    const piecesFor = (path) => {
+      const list = [];
+      for (const it of this.seq) {
+        const a = Math.max(sp.o0, it.o0);
+        const b = Math.min(sp.o1, it.o1);
+        if (b - a < 0.5 / this.fps) continue;
+        if (it.t === 's') list.push({ path, a: it.a + (a - it.o0) * it.sp, b: it.a + (b - it.o0) * it.sp, sp: it.sp });
+        else list.push({ gap: b - a });
+      }
+      return list;
+    };
+    const ev = (v) => Math.max(2, Math.round(v / 2) * 2);
+    const plateCanvas = (opaque) => {
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const x = c.getContext('2d');
+      if (opaque) { x.fillStyle = '#000'; x.fillRect(0, 0, W, H); }
+      return { c, x };
+    };
+    const disp = (L) => ({ x: Math.round(L.x), y: Math.round(L.y), w: ev(L.w), h: ev(L.h), r: L.shape === 'circle' ? Math.min(ev(L.w), ev(L.h)) / 2 : (L.radius || 0) });
+    const shadowOf = (x, L, missing) => {
+      const d = disp(L);
+      const path = new Path2D();
+      path.roundRect(d.x, d.y, d.w, d.h, Math.min(d.r, d.w / 2, d.h / 2));
+      if (L.shadow) {
+        x.save();
+        x.shadowColor = 'rgba(0,0,0,0.55)';
+        x.shadowBlur = 50;
+        x.shadowOffsetY = 18;
+        x.fillStyle = '#000';
+        x.fill(path);
+        x.restore();
+      }
+      if (missing) { x.fillStyle = '#16181e'; x.fill(path); }
+    };
+    const borderOf = (x, L) => {
+      const d = disp(L);
+      const bw = L.borderWidth || 0;
+      if (bw <= 0.5) return;
+      const r = Math.min(d.r, d.w / 2, d.h / 2);
+      const p = new Path2D();
+      p.roundRect(d.x + bw / 2, d.y + bw / 2, d.w - bw, d.h - bw, Math.max(0, r - bw / 2));
+      x.lineWidth = bw;
+      x.strokeStyle = L.borderColor || '#ffffff';
+      x.stroke(p);
+    };
+    const plates = [];
+    const p0 = plateCanvas(true);
+    const bgImg = await this.loadImage(this.bgFor(st.entry));
+    if (bgImg) {
+      const s = Math.max(W / bgImg.naturalWidth, H / bgImg.naturalHeight);
+      p0.x.drawImage(bgImg, (W - bgImg.naturalWidth * s) / 2, (H - bgImg.naturalHeight * s) / 2, bgImg.naturalWidth * s, bgImg.naturalHeight * s);
+    }
+    let cur = p0;
+    const layers = [];
+    for (let i = 0; i < order.length; i++) {
+      const name = order[i];
+      const L = scene[name];
+      const visible = L && L.visible !== false && L.w > 2 && L.h > 2;
+      const path = this.trackSrc[name];
+      const size = path ? await this.trackSizeOf(name) : null;
+      if (visible) shadowOf(cur.x, L, !path || !size);
+      plates.push(cur.c.toDataURL('image/png'));
+      cur = plateCanvas(false);
+      if (!visible || !path || !size) { layers.push(null); if (visible) borderOf(cur.x, L); continue; }
+      const d = disp(L);
+      const cr = crops[name];
+      const ox = cr ? size.w * cr.x : 0;
+      const oy = cr ? size.h * cr.y : 0;
+      const sw = cr ? size.w * cr.w : size.w;
+      const sh = cr ? size.h * cr.h : size.h;
+      const c = cropFor(L, sw, sh);
+      let zoom = null;
+      const zs = this.resolvedZooms(name).filter((z) => z.o1 > sp.o0 && z.o0 < sp.o1);
+      if (zs.length) zoom = zoompanFilter(zs, { W: d.w, H: d.h, fps: this.fps, offset: -sp.o0 });
+      let mask = null;
+      if (d.r > 0.5) {
+        const m = document.createElement('canvas');
+        m.width = d.w;
+        m.height = d.h;
+        const mx = m.getContext('2d');
+        mx.fillStyle = '#000';
+        mx.fillRect(0, 0, d.w, d.h);
+        mx.fillStyle = '#fff';
+        mx.beginPath();
+        mx.roundRect(0, 0, d.w, d.h, Math.min(d.r, d.w / 2, d.h / 2));
+        mx.fill();
+        mask = m.toDataURL('image/png');
+      }
+      layers.push({
+        pieces: piecesFor(path),
+        size,
+        crop: { x: ox + c.sx, y: oy + c.sy, w: c.vw, h: c.vh },
+        box: { x: d.x, y: d.y, w: d.w, h: d.h },
+        mask,
+        zoom,
+      });
+      borderOf(cur.x, L);
+    }
+    plates.push(cur.c.toDataURL('image/png'));
+    return { A: offset + sp.o0, B: offset + sp.o1, plates, layers };
   }
 
   // ---------------------------------------------------------------- overlay media
@@ -1002,8 +1472,9 @@ export class Cutter {
     const W = this.p.width || 1920;
     const H = this.p.height || 1080;
     // zoom (while a zoom is selected and paused, the whole frame shows the zoom window instead)
+    this.renderRecomp(t);
     const zSel = this.selItem && this.selItem.lane === 'zoom' && !this.playing ? this.selected : null;
-    const zs = zSel ? { z: 1, x0: 0, y0: 0 } : zoomState(this.resolvedZooms(), t);
+    const zs = zSel && (zSel.target || 'all') === 'all' ? { z: 1, x0: 0, y0: 0 } : zoomState(this.resolvedZooms('all'), t);
     this.zoomWrap.style.transform = zs.z > 1.0001 ? `scale(${zs.z}) translate(${-zs.x0 * 100}%, ${-zs.y0 * 100}%)` : '';
     this.renderZoomRect(zSel);
     // color filter
@@ -1065,11 +1536,12 @@ export class Cutter {
     const z = Math.max(1, zm.scale);
     const x0 = clamp((zm.x ?? 0.5) - 0.5 / z, 0, 1 - 1 / z);
     const y0 = clamp((zm.y ?? 0.5) - 0.5 / z, 0, 1 - 1 / z);
+    const b = this.zoomBox(zm); // the layer it zooms into (or the whole frame)
     r.hidden = false;
-    r.style.left = `${x0 * 100}%`;
-    r.style.top = `${y0 * 100}%`;
-    r.style.width = `${100 / z}%`;
-    r.style.height = `${100 / z}%`;
+    r.style.left = `${(b.x + x0 * b.w) * 100}%`;
+    r.style.top = `${(b.y + y0 * b.h) * 100}%`;
+    r.style.width = `${(b.w / z) * 100}%`;
+    r.style.height = `${(b.h / z) * 100}%`;
     r.querySelector('span').textContent = `${fmtSpeed(z).replace('×', '×')} · arraste para escolher o ponto`;
   }
 
@@ -1189,7 +1661,7 @@ export class Cutter {
       const zm = this.selected;
       if (!zm || e.button !== 0) return;
       const p = local(e);
-      this.zDrag = { sx: p.x, sy: p.y, x: zm.x ?? 0.5, y: zm.y ?? 0.5 };
+      this.zDrag = { sx: p.x, sy: p.y, x: zm.x ?? 0.5, y: zm.y ?? 0.5, box: this.zoomBox(zm) };
       this.zoomRect.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
@@ -1201,8 +1673,8 @@ export class Cutter {
       const z = Math.max(1, zm.scale);
       const half = 0.5 / z;
       this.updateItem(this.selItem, {
-        x: clamp(d.x + (p.x - d.sx) / p.pw, half, 1 - half),
-        y: clamp(d.y + (p.y - d.sy) / p.ph, half, 1 - half),
+        x: clamp(d.x + (p.x - d.sx) / (p.pw * d.box.w), half, 1 - half),
+        y: clamp(d.y + (p.y - d.sy) / (p.ph * d.box.h), half, 1 - half),
       });
     });
     const zUp = () => { if (this.zDrag) { this.zDrag = null; this.endEdit(); } };
@@ -1365,6 +1837,7 @@ export class Cutter {
           v.play().catch(() => {});
         }
       } else {
+        this.useClip(it);
         this.clip.currentTime = clamp(this.t - it.o0, 0, it.o1 - it.o0);
         this.show(this.clip);
         if (this.playing) {
@@ -1524,6 +1997,7 @@ export class Cutter {
       }
       this.syncAudio(true);
     } else {
+      if (this.prerolled !== this.clip) this.useClip(nx);
       this.clip.currentTime = 0;
       this.clip.volume = 1;
       this.clip.play().catch(() => {});
@@ -1545,6 +2019,7 @@ export class Cutter {
     if (this.prerolled || remaining > lead) return;
     const nx = this.seq[this.item + 1];
     if (nx && nx.t === 'x') {
+      this.useClip(nx);
       this.prerolled = this.clip;
       this.clip.volume = 0;
       this.clip.currentTime = 0;
@@ -1597,22 +2072,27 @@ export class Cutter {
 
   // ---------------------------------------------------------------- lanes / zoom / layout
 
-  // Lanes under the waveform: scenes, zooms, texts & media (as many rows as
-  // needed so nothing overlaps), filters.
-  layoutLanes() {
-    const spans = this.overlays.map((o) => ({ id: o.id, ...this.span(o) })).sort((a, b) => a.o0 - b.o0);
+  // Lanes under the waveform: scenes, then only what has something in it:
+  // layout (zooms and layout changes), overlays (texts & media) and filters,
+  // each with as many rows as needed so nothing overlaps.
+  packRows(items, max) {
+    const spans = items.map((o) => ({ id: o.id, ...this.span(o) })).sort((a, b) => a.o0 - b.o0);
     const ends = [];
-    this.ovRow = new Map();
-    for (const s of spans) {
-      let r = ends.findIndex((e) => e <= s.o0 + 1e-3);
-      if (r < 0) {
-        if (ends.length < MAX_OV_ROWS) r = ends.length;
-        else r = ends.indexOf(Math.min(...ends));
-      }
-      ends[r] = s.o1;
-      this.ovRow.set(s.id, r);
+    const rows = new Map();
+    for (const sp of spans) {
+      let r = ends.findIndex((e) => e <= sp.o0 + 1e-3);
+      if (r < 0) r = ends.length < max ? ends.length : ends.indexOf(Math.min(...ends));
+      ends[r] = sp.o1;
+      rows.set(sp.id, r);
     }
-    const rows = Math.max(1, ends.length);
+    return { rows, n: ends.length };
+  }
+
+  layoutLanes() {
+    const ov = this.packRows(this.overlays, MAX_OV_ROWS);
+    this.ovRow = ov.rows;
+    const lay = this.packRows([...this.layouts, ...this.zooms], 3);
+    this.layRow = lay.rows;
     const lanes = [];
     let y = RULER + 4 + MAIN_H + 8;
     const add = (key, label, extra = {}) => {
@@ -1620,9 +2100,9 @@ export class Cutter {
       y += LANE_H + LANE_GAP;
     };
     add('scene', 'Cenas');
-    add('zoom', 'Zoom');
-    for (let r = 0; r < rows; r++) add('ov', r === 0 ? 'Textos e mídias' : '', { row: r });
-    add('fx', 'Filtros');
+    for (let r = 0; r < lay.n; r++) add('lay', r === 0 ? 'Layout' : '', { row: r });
+    for (let r = 0; r < ov.n; r++) add('ov', r === 0 ? 'Sobreposições' : '', { row: r });
+    if (this.fx.length || (this.fxGlobal && !isNeutral(this.fxGlobal.p))) add('fx', 'Filtros');
     this.lanes = lanes;
     const total = y + 2;
     if (this.laneTotal !== total) {
@@ -1637,17 +2117,30 @@ export class Cutter {
     return this.lanes.find((l) => y >= l.y - 2 && y < l.y + l.h + 2) || null;
   }
 
+  // Items drawn in a lane, each with its reference ({ lane, id }).
+  laneItems(lane) {
+    if (lane.key === 'lay') {
+      return [
+        ...this.layouts.filter((o) => this.layRow.get(o.id) === lane.row).map((it) => ({ it, lane: 'layout' })),
+        ...this.zooms.filter((o) => this.layRow.get(o.id) === lane.row).map((it) => ({ it, lane: 'zoom' })),
+      ];
+    }
+    if (lane.key === 'fx') return this.fx.map((it) => ({ it, lane: 'fx' }));
+    if (lane.key === 'ov') return this.overlays.filter((o) => this.ovRow.get(o.id) === lane.row).map((it) => ({ it, lane: 'ov' }));
+    return [];
+  }
+
   // Item of a lane under x (with which edge, if near one).
   laneItemAt(lane, x) {
-    const list = lane.key === 'zoom' ? this.zooms : lane.key === 'fx' ? this.fx : this.overlays.filter((o) => this.ovRow.get(o.id) === lane.row);
+    const list = this.laneItems(lane);
     for (let i = list.length - 1; i >= 0; i--) {
-      const it = list[i];
+      const { it, lane: ref } = list[i];
       const { o0, o1 } = this.span(it);
       const x0 = this.xOf(o0);
       const x1 = this.xOf(o1);
       if (x >= x0 - 5 && x <= x1 + 5) {
         const edge = x1 - x0 > 16 && Math.abs(x - x0) < 7 ? 'a' : x1 - x0 > 16 && Math.abs(x - x1) < 7 ? 'b' : null;
-        return { it, edge, o0, o1 };
+        return { it, ref, edge, o0, o1 };
       }
     }
     return null;
@@ -1698,6 +2191,11 @@ export class Cutter {
   onScroll() {
     this.viewStart = this.scroller.scrollLeft / this.pps;
     this.canvas.style.left = `${this.scroller.scrollLeft}px`;
+    // the pointer stays still while the timeline moves under it (wheel, auto-scroll)
+    if (this.drag && this.lastEv && !this.inScrollMove) {
+      this.inScrollMove = true;
+      try { this.move(this.lastEv); } finally { this.inScrollMove = false; }
+    }
     this.requestDraw();
     this.renderBubble();
   }
@@ -1830,8 +2328,27 @@ export class Cutter {
     const { x, y } = this.local(e);
     if (y > this.viewH) return; // native scrollbar
     this.closePops();
+    this.lastEv = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey };
     const t = this.tOf(x);
     const lane = y >= RULER + 4 + MAIN_H + 4 ? this.laneAt(y) : null;
+    // Shift+click: grows / shrinks the selection (or selects from the playhead),
+    // wherever the timeline was scrolled or zoomed to in between.
+    if (e.shiftKey && y >= RULER && (!lane || !this.laneItemAt(lane, x))) {
+      const v = this.snapOut(t);
+      let anchor;
+      if (this.sel) anchor = Math.abs(v - this.sel.a) < Math.abs(v - this.sel.b) ? this.sel.b : this.sel.a;
+      else anchor = this.snapOut(this.t);
+      if (Math.abs(anchor - v) >= 1 / this.fps) {
+        this.sel = { a: Math.min(anchor, v), b: Math.max(anchor, v) };
+        this.focus = -1;
+        if (this.playing) this.pause();
+        this.drag = { mode: 'select', anchor, startX: x, moved: true };
+        this.renderSelection();
+        this.scroller.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        return;
+      }
+    }
     if (y < RULER) {
       this.drag = { mode: 'scrub' };
       this.seek(t);
@@ -1856,6 +2373,11 @@ export class Cutter {
     if (lane.key === 'scene') {
       const hit = this.sceneAt(x);
       if (!hit) return;
+      if (hit.sc.kind === 'image' && Math.abs(x - this.xOf(hit.o1)) < 8) {
+        // a picture scene: drag its end to show it longer / shorter
+        this.drag = { mode: 'sceneLen', id: hit.sc.id, snap: this.snapshot(), o0: hit.o0, moved: false, startX: x };
+        return;
+      }
       this.drag = { mode: 'scene', id: hit.sc.id, startX: x, moved: false, target: null };
       return;
     }
@@ -1866,8 +2388,7 @@ export class Cutter {
       this.seek(t);
       return;
     }
-    const laneKey = lane.key === 'ov' ? 'ov' : lane.key;
-    const ref = { lane: laneKey, id: hit.it.id };
+    const ref = { lane: hit.ref, id: hit.it.id };
     if (!this.selItem || this.selItem.id !== hit.it.id) this.selectItem(ref);
     this.beginEdit();
     this.drag = { mode: 'item', ref, edge: hit.edge, grab: t - hit.o0, o0: hit.o0, o1: hit.o1, startX: x, moved: false };
@@ -1880,7 +2401,7 @@ export class Cutter {
     if (!lane || y < RULER + 4 + MAIN_H) return;
     if (this.laneItemAt(lane, x)) return;
     this.seek(this.tOf(x));
-    if (lane.key === 'zoom') this.addZoom();
+    if (lane.key === 'lay') this.addZoom();
     else if (lane.key === 'ov') this.panel.addText();
     else if (lane.key === 'fx') this.panel.setTab('filtros');
   }
@@ -1889,6 +2410,10 @@ export class Cutter {
     const { x, y } = this.local(e);
     const t = this.tOf(x);
     this.hover = { x, t };
+    if (this.drag) {
+      this.lastEv = { clientX: e.clientX, clientY: e.clientY };
+      this.autoScroll(x);
+    }
     if (y < RULER + 4 + MAIN_H + 4) this.showThumb(x, t);
     else this.hoverBox.hidden = true;
     const d = this.drag;
@@ -1897,7 +2422,10 @@ export class Cutter {
       let cursor = 'text';
       if (y < RULER) cursor = 'pointer';
       else if (lane) {
-        if (lane.key === 'scene') cursor = this.sceneAt(x) ? 'grab' : 'default';
+        if (lane.key === 'scene') {
+          const hs = this.sceneAt(x);
+          cursor = hs ? (hs.sc.kind === 'image' && Math.abs(x - this.xOf(hs.o1)) < 8 ? 'ew-resize' : 'grab') : 'default';
+        }
         else {
           const hit = this.laneItemAt(lane, x);
           cursor = hit ? (hit.edge ? 'ew-resize' : 'grab') : 'default';
@@ -1957,6 +2485,10 @@ export class Cutter {
       this.requestDraw();
       this.renderPreview(this.t);
       this.panel.syncSelected();
+    } else if (d.mode === 'sceneLen') {
+      if (!d.moved && Math.abs(x - d.startX) < 3) return;
+      d.moved = true;
+      this.setImageSceneLen(d.id, t - d.o0);
     } else if (d.mode === 'scene') {
       if (!d.moved && Math.abs(x - d.startX) < 5) return;
       d.moved = true;
@@ -1973,10 +2505,32 @@ export class Cutter {
     }
   }
 
+  // While dragging near an edge of the visible timeline, it scrolls by itself.
+  autoScroll(x) {
+    const d = this.drag;
+    const edge = 28;
+    const dir = d && !this.fitMode && ['select', 'edge', 'item'].includes(d.mode)
+      ? (x < edge ? -1 : x > this.viewW - edge ? 1 : 0) : 0;
+    if (!dir) { clearInterval(this.autoTimer); this.autoTimer = null; this.autoDir = 0; return; }
+    const depth = dir < 0 ? edge - x : x - (this.viewW - edge);
+    this.autoSpeed = clamp(depth, 4, 60) * 0.9;
+    this.autoDir = dir;
+    if (this.autoTimer) return;
+    this.autoTimer = setInterval(() => {
+      if (!this.drag || !this.autoDir) { clearInterval(this.autoTimer); this.autoTimer = null; return; }
+      const before = this.scroller.scrollLeft;
+      this.scroller.scrollLeft = before + this.autoDir * this.autoSpeed;
+      if (this.scroller.scrollLeft === before) return;
+      this.onScroll();
+    }, 30);
+  }
+
   up(e) {
     const d = this.drag;
     if (!d) return;
     this.drag = null;
+    clearInterval(this.autoTimer);
+    this.autoTimer = null;
     try { this.scroller.releasePointerCapture(e.pointerId); } catch { /* released */ }
     if (d.mode === 'select' && !d.moved) {
       const { x } = this.local(e);
@@ -1986,6 +2540,14 @@ export class Cutter {
     } else if (d.mode === 'item') {
       this.endEdit();
       return;
+    } else if (d.mode === 'sceneLen') {
+      if (d.moved && d.snap !== this.snapshot()) {
+        this.pushHistory(d.snap);
+        this.afterEdit(this.t);
+        const sc = this.scenes.find((q) => q.id === d.id);
+        const sp = sc && this.sceneSpan(sc.id);
+        if (sp) this.toast(`“${sc.name}”: ${fmtLen(sp.o1 - sp.o0)} na tela.`, 'ok', 2000);
+      }
     } else if (d.mode === 'scene') {
       if (d.moved && d.target != null) {
         const from = this.scenes.findIndex((s) => s.id === d.id);
@@ -2080,7 +2642,7 @@ export class Cutter {
   exportSeq() {
     return this.seq.map((it) => (it.t === 's'
       ? { t: 's', a: Number(it.a.toFixed(4)), b: Number(it.b.toFixed(4)), sp: Number(it.sp.toFixed(4)) }
-      : { t: 'x' }));
+      : { t: 'x', tr: it.tr }));
   }
 
   // Data URL images for the export (file images would make the canvas unexportable).
@@ -2099,7 +2661,7 @@ export class Cutter {
 
   // Everything drawn over the picture, rendered for the export (times on the final file).
   async exportPost(offset, { W, H }, { videoOnly = false } = {}) {
-    const zooms = this.resolvedZooms();
+    const zooms = this.resolvedZooms('all');
     const vf = [];
     const zp = zoompanFilter(zooms, { W, H, fps: this.fps, offset });
     if (zp) vf.push(zp);
@@ -2148,7 +2710,8 @@ export class Cutter {
       const r = rasterize(o, W, H, res);
       overlays.push({ ...base, png: r.png, x: r.x, y: r.y, w: r.w, h: r.h });
     }
-    return { vf: vf.join(',') || null, overlays };
+    const recomp = videoOnly ? [] : await this.exportRecomp(offset);
+    return { vf: vf.join(',') || null, overlays, recomp };
   }
 
   // The same edits as the export, for the audio-only renders.
@@ -2157,7 +2720,7 @@ export class Cutter {
       seq: this.exportSeq(),
       audioDelay: this.audioDelay,
       audioFx: this.audioFx,
-      transition: this.seq.some((it) => it.t === 'x') ? this.trans : null,
+      transitions: this.usedTransitions(),
       post: { overlays: (await this.exportPost(0, { W: this.p.width || 1920, H: this.p.height || 1080 }, { videoOnly: true })).overlays.filter((o) => o.video) },
       ...extra,
     };
@@ -2179,7 +2742,7 @@ export class Cutter {
       audioDelay: this.audioDelay,
       title: this.title(),
       intro: this.useIntro ? this.intro : null,
-      transition: this.seq.some((it) => it.t === 'x') ? this.trans : null,
+      transitions: this.usedTransitions(),
       post,
       audioFx: this.audioFx,
       sidecars: this.p.sidecars || null,
@@ -2221,6 +2784,32 @@ export class Cutter {
     this.onNewScene(project);
   }
 
+  // "Upload" in the Scenes tab: a video or a picture from the computer as a new scene.
+  async uploadScene(picked = null) {
+    if (!this.p.folder || !this.p.original) {
+      this.toast('Só dá para adicionar cenas em aulas gravadas por este app que ainda têm os arquivos originais.', 'info', 7000);
+      return;
+    }
+    const file = picked || await this.api.scene.pick().catch(() => null);
+    if (!file) return;
+    clearTimeout(this.saveTimer);
+    await this.api.saveProject(this.p.folder, this.editState()).catch(() => {});
+    const project = this.p;
+    this.releaseMedia(); // the lesson's files are rewritten
+    this.onBusy(true, 'Adicionando a nova cena…');
+    let res = null;
+    try {
+      res = await this.api.scene.add(project.folder, file);
+    } catch (err) {
+      this.toast(`Não foi possível usar esse arquivo. ${String(err.message || '').replace(/^Error invoking remote method '[^']+': (Error: )?/, '').slice(0, 300)}`, 'error', 9000);
+    } finally {
+      this.onBusy(false);
+    }
+    if (!res) { if (this.p === project) this.restoreMedia(); return; }
+    this.close();
+    this.onSceneAdded(project, res);
+  }
+
   async discard() {
     const ok = await this.confirm({
       title: 'Descartar esta gravação?',
@@ -2247,7 +2836,7 @@ export class Cutter {
     this.renderIntro();
     $('#cut-undo').disabled = !this.history.length;
     $('#cut-redo').disabled = !this.future.length;
-    $('#cut-transition').classList.toggle('muted', !this.trans);
+    $('#cut-transition').classList.toggle('muted', !this.transList.length);
     this.requestDraw();
     this.renderPreview(this.t);
     this.panel.render();
@@ -2300,7 +2889,7 @@ export class Cutter {
       b.innerHTML = `
         ${removed ? `<span class="bub-len">Cortados ${fmtLen(removed[1] - removed[0])}</span>
         <button class="bub" data-act="restore">${icon('undo', 14)} Restaurar</button>` : ''}
-        <button class="bub ${hasT ? '' : 'accent'}" data-act="transition">${icon(hasT ? 'x' : 'plus', 14)} ${hasT ? 'Tirar transição' : 'Transição'}</button>`;
+        <button class="bub ${hasT ? '' : 'accent'}" data-act="transition">${icon(hasT ? 'film' : 'plus', 14)} ${hasT ? 'Trocar transição' : 'Transição'}</button>`;
       this.placeBubble(this.xOf(seam.o));
     } else {
       b.hidden = true;
@@ -2463,7 +3052,8 @@ export class Cutter {
         if (x1 - x0 > 50) {
           ctx.fillStyle = '#c6c8ff';
           ctx.font = `600 11px ${font}`;
-          ctx.fillText('Transição', x0 + 8, mid);
+          const c = this.transClip(it.tr);
+          ctx.fillText(c ? c.name : 'Transição', x0 + 8, mid);
         }
         continue;
       }
@@ -2602,13 +3192,20 @@ export class Cutter {
           const dragging = this.drag && this.drag.mode === 'scene' && this.drag.moved && this.drag.id === sc.id;
           block((s.o0 - v0) * pps, (s.o1 - v0) * pps, lane.y, lane.h, SCENE_COLORS[i % SCENE_COLORS.length], `${sc.name} · ${fmt(s.o1 - s.o0)}`, false, { text: '#e5e7eb', alpha: dragging ? 0.4 : 1 });
         });
-      } else if (lane.key === 'zoom') {
+      } else if (lane.key === 'lay') {
         const res = this.resolvedZooms();
-        for (const z of this.zooms) {
+        for (const { it, lane: kind } of this.laneItems(lane)) {
+          empty = false;
+          if (kind === 'layout') {
+            const { o0, o1 } = this.span(it);
+            block((o0 - v0) * pps, (o1 - v0) * pps, lane.y, lane.h, '#22d3ee', `Layout: ${it.name || 'personalizado'}`, sel && sel.id === it.id, { alpha: this.canRecompose() ? 1 : 0.4 });
+            continue;
+          }
+          const z = it;
           const r = res.find((q) => q.id === z.id);
           const { o0, o1 } = r || this.span(z);
-          empty = false;
-          block((o0 - v0) * pps, (o1 - v0) * pps, lane.y, lane.h, '#f5b84a', `${fmtSpeed(z.scale)} ${z.mode === 'follow' ? '· mouse' : ''}`, sel && sel.id === z.id, { alpha: r ? 1 : 0.4 });
+          const where = z.target === 'screen' ? ' · tela' : z.target === 'camera' ? ' · câmera' : '';
+          block((o0 - v0) * pps, (o1 - v0) * pps, lane.y, lane.h, '#f5b84a', `Zoom ${fmtSpeed(z.scale)}${where}${z.mode === 'follow' ? ' · mouse' : ''}`, sel && sel.id === z.id, { alpha: r ? 1 : 0.4 });
         }
       } else if (lane.key === 'ov') {
         for (const o of this.overlays) {
@@ -2654,7 +3251,7 @@ export class Cutter {
         ctx.fillStyle = '#4a505d';
         ctx.font = `11px ${font}`;
         ctx.textBaseline = 'middle';
-        const hint = { zoom: 'Zoom · clique duplo ou Z para adicionar', ov: 'Textos e mídias · clique duplo ou X para adicionar texto', fx: 'Filtros · escolha no painel Filtros' }[lane.key] || lane.label;
+        const hint = lane.label;
         ctx.fillText(hint, 10, lane.y + lane.h / 2 + 0.5);
       }
     }

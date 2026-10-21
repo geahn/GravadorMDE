@@ -479,24 +479,30 @@ async function runExport(job) {
   const ns = Math.round(48000 / fps);
   const half = 0.5 / fps;
   const audioOnly = job.audioOnly || null;
-  const trans = job.transition || null;
+  // Transitions: one clip per id (the library), or the single clip of older jobs.
+  const transMap = { ...(job.transitions || {}) };
+  if (job.transition) transMap._default = job.transition;
+  const transIds = Object.keys(transMap);
+  const transOf = (it) => transMap[it.tr] || transMap._default || (transIds.length ? transMap[transIds[0]] : null);
+  const transLen = (clip) => Math.min(3, clip.duration || 2);
   const post = job.post || {};
   const afx = { ...AUDIO_FX_DEFAULT, ...(job.audioFx || {}) };
   for (const k of ['master', 'mic', 'sys', 'media']) afx[k] = Math.max(0, Math.min(4, Number(afx[k]) || 0));
   // seq: lesson pieces ({t:'s', a, b, sp} in source seconds, sp = speed) and transitions ({t:'x'}), in output order.
   let seq = job.seq && job.seq.length ? job.seq : [{ t: 's', a: 0, b: job.duration }];
-  if (!trans) seq = seq.filter((it) => it.t === 's');
+  seq = seq.filter((it) => it.t === 's' || transOf(it));
   seq = seq.filter((it) => it.t === 'x' || it.b - it.a >= 1 / fps);
   const spOf = (it) => (Number(it.sp) > 0 ? Math.max(0.1, Math.min(16, Number(it.sp))) : 1);
   const segs = seq.filter((it) => it.t === 's');
   if (!segs.length) throw new Error('Não sobrou nenhum trecho para exportar.');
   const keptSrc = segs.reduce((sum, it) => sum + (it.b - it.a), 0);
   const keptDur = segs.reduce((sum, it) => sum + (it.b - it.a) / spOf(it), 0);
-  const transDur = trans ? Math.min(3, trans.duration) : 0;
-  const nTrans = seq.length - segs.length;
+  const xs = seq.filter((it) => it.t === 'x');
+  const nTrans = xs.length;
+  const transTotal = xs.reduce((sum, it) => sum + transLen(transOf(it)), 0);
   const intro = audioOnly ? null : (job.intro || null);
   const introDur = intro ? intro.duration : 0;
-  const total = introDur + keptDur + nTrans * transDur;
+  const total = introDur + keptDur + transTotal;
   const level = job.level !== false;
   const tracks = audioOnly ? [] : (job.tracks || []).filter((t) => t.source && fs.existsSync(t.source));
   // Lip sync: cameras deliver frames late, so the audio is delayed to match.
@@ -539,7 +545,7 @@ async function runExport(job) {
     let preGain = 0;
     let gain = 0;
     let introGain = 0;
-    let transGain = 0;
+    const transGain = new Map();
     if (level && hasAudio) {
       const measure = async (chain, from, to) => {
         const f = path.join(tmp, 'measure.txt');
@@ -566,7 +572,10 @@ async function runExport(job) {
         ? gainFor(await measureLoudness(['-i', clip.path], `[0:a]${AUDIO_IN},ebur128=framelog=quiet[a]`, clip.duration, null))
         : 0);
       introGain = await clipGain(intro);
-      if (nTrans) transGain = await clipGain(trans);
+      for (const it of xs) {
+        const clip = transOf(it);
+        if (!transGain.has(clip.path)) transGain.set(clip.path, await clipGain(clip));
+      }
     }
     const lev = levelOn
       ? `,${HIGHPASS},volume=${preGain.toFixed(2)}dB,${COMPRESSOR},volume=${gain.toFixed(2)}dB,${LIMITER}`
@@ -620,28 +629,49 @@ async function runExport(job) {
       graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${intro.hasAudio ? clipLevel(introGain) : ''}[ia]`);
       order.push('[iv][ia]');
     }
-    if (nTrans) {
-      const c = clipInputs(inputs, trans, fps, transDur, next);
-      next = c.next;
-      const D = transDur.toFixed(3);
-      const tv = Array.from({ length: nTrans }, (_, j) => `[tv${j}]`).join('');
-      const ta = Array.from({ length: nTrans }, (_, j) => `[ta${j}]`).join('');
-      if (!audioOnly) graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS${nTrans > 1 ? `,split=${nTrans}` : ''}${tv}`);
-      graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${trans.hasAudio ? clipLevel(transGain) : ''}${nTrans > 1 ? `,asplit=${nTrans}` : ''}${ta}`);
+    // each transition clip once, split into as many copies as it is used
+    const xLabel = new Map(); // seq index -> j
+    {
+      const groups = new Map(); // clip path -> [seq indexes]
+      seq.forEach((it, i) => {
+        if (it.t !== 'x') return;
+        const clip = transOf(it);
+        if (!groups.has(clip.path)) groups.set(clip.path, { clip, idx: [] });
+        groups.get(clip.path).idx.push(i);
+      });
+      let j = 0;
+      for (const { clip, idx } of groups.values()) {
+        const n = idx.length;
+        const T = transLen(clip);
+        const c = clipInputs(inputs, clip, fps, T, next);
+        next = c.next;
+        const D = T.toFixed(3);
+        const labels = idx.map((i, k) => { xLabel.set(i, j + k); return j + k; });
+        j += n;
+        if (!audioOnly) graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS${n > 1 ? `,split=${n}` : ''}${labels.map((q) => `[tv${q}]`).join('')}`);
+        graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${clip.hasAudio ? clipLevel(transGain.get(clip.path) || 0) : ''}${n > 1 ? `,asplit=${n}` : ''}${labels.map((q) => `[ta${q}]`).join('')}`);
+      }
     }
     let si = 0;
-    let ti = 0;
-    for (const it of seq) {
-      if (it.t === 's') { order.push(audioOnly ? `[msa${si}]` : `[msv${si}][msa${si}]`); si += 1; } else { order.push(audioOnly ? `[ta${ti}]` : `[tv${ti}][ta${ti}]`); ti += 1; }
-    }
+    seq.forEach((it, i) => {
+      if (it.t === 's') { order.push(audioOnly ? `[msa${si}]` : `[msv${si}][msa${si}]`); si += 1; return; }
+      const q = xLabel.get(i);
+      order.push(audioOnly ? `[ta${q}]` : `[tv${q}][ta${q}]`);
+    });
     graph.push(audioOnly
       ? `${order.join('')}concat=n=${order.length}:v=0:a=1[a]`
       : `${order.join('')}concat=n=${order.length}:v=1:a=1[v][a]`);
 
-    // ---- post: zoom + color filters on the picture, then texts/images/videos on top
+    // ---- other layouts: stretches rebuilt from the camera and screen files
     let vCur = 'v';
+    if (!audioOnly && post.recomp && post.recomp.length) {
+      const r = await recompose({ spans: post.recomp, inputs, graph, next, base: vCur, fps, vOff, tmp });
+      next = r.next;
+      vCur = r.out;
+    }
+    // ---- post: zoom + color filters on the picture, then texts/images/videos on top
     if (!audioOnly && post.vf) {
-      graph.push(`[v]${post.vf}[vfx]`);
+      graph.push(`[${vCur}]${post.vf}[vfx]`);
       vCur = 'vfx';
     }
     const extraAudio = [];
@@ -788,7 +818,14 @@ async function runExport(job) {
       if (job.trashOriginals && fs.existsSync(originalsDir) && job.source.startsWith(originalsDir)) {
         await shell.trashItem(originalsDir).then(() => { sourceTrashed = true; }).catch(() => {});
         if (sourceTrashed) patch.originals = null;
+        // "only the final video": separate camera / screen files of an earlier export go too
+        const prev = (await readProject(job.folder)) || {};
+        for (const k of ['camera', 'screen']) {
+          const f = prev.exports && prev.exports[k] ? path.join(job.folder, prev.exports[k]) : null;
+          if (f && fs.existsSync(f) && !result.tracks.some((t) => t.path === f)) await shell.trashItem(f).catch(() => {});
+        }
       }
+      result.originalsKept = !sourceTrashed && fs.existsSync(originalsDir) && job.source.startsWith(originalsDir);
       await writeProject(job.folder, patch);
     } else if (job.trashOriginals && createdFiles.has(job.source)) {
       await shell.trashItem(job.source).then(() => { sourceTrashed = true; createdFiles.delete(job.source); }).catch(() => {});
@@ -835,6 +872,97 @@ function overlayOn(base, label, o, AD, W, H, out) {
   add(anim.in, pin, 1);
   add(anim.out, pout, -1);
   return `[${base}][${label}]overlay=x='${xs.join('+')}':y='${ys.join('+')}':eof_action=pass:enable='between(t,${A},${B})'[${out}]`;
+}
+
+// Stretches of the final video rebuilt with another layout (or with a zoom
+// inside the screen / camera layer), from the separate camera and screen files.
+// Everything is prepared by the editor (same math as its preview):
+//   span: { A, B, plates: [png data URL], layers: [{ pieces: [{ path, a, b, sp } | { gap }],
+//           size: {w,h}, crop: {x,y,w,h}, box: {x,y,w,h}, mask, zoom }] }
+// Drawing order: plate 0 (background + shadow), layer 0, plate 1, layer 1, plate 2.
+async function recompose({ spans, inputs, graph, next, base, fps, vOff, tmp }) {
+  let n = next;
+  let cur = base;
+  const ev = (v) => Math.max(2, Math.round(v / 2) * 2);
+  const writePng = async (dataUrl, name) => {
+    const f = path.join(tmp, name);
+    await fsp.writeFile(f, Buffer.from(dataUrl.split(',')[1], 'base64'));
+    return f;
+  };
+  for (let k = 0; k < spans.length; k++) {
+    const sp = spans[k];
+    const D = Math.max(1 / fps, sp.B - sp.A);
+    const DS = D.toFixed(4);
+    const plates = [];
+    for (let i = 0; i < (sp.plates || []).length; i++) {
+      if (!sp.plates[i]) { plates.push(null); continue; }
+      const f = await writePng(sp.plates[i], `rc${k}p${i}.png`);
+      inputs.push('-loop', '1', '-framerate', String(fps), '-t', DS, '-i', f);
+      plates.push(`${n}:v`);
+      n += 1;
+    }
+    if (!plates[0]) throw new Error('Layout sem fundo.');
+    graph.push(`[${plates[0]}]format=rgba,trim=duration=${DS},setpts=PTS-STARTPTS[rc${k}b0]`);
+    let acc = `rc${k}b0`;
+    for (let li = 0; li < sp.layers.length; li++) {
+      const L = sp.layers[li];
+      if (L && L.pieces && L.pieces.length) {
+        const parts = [];
+        L.pieces.forEach((pc, pi) => {
+          const lab = `rc${k}l${li}p${pi}`;
+          const sz = `${ev(L.size.w)}x${ev(L.size.h)}`;
+          if (pc.gap) {
+            graph.push(`color=black:s=${sz}:r=${fps}:d=${pc.gap.toFixed(4)},setsar=1,format=yuv420p[${lab}]`);
+          } else {
+            const len = pc.b - pc.a;
+            const spd = Number(pc.sp) > 0 ? pc.sp : 1;
+            const nF = Math.max(1, Math.round((len / spd) * fps));
+            inputs.push('-ss', Math.max(0, pc.a + vOff).toFixed(4), '-t', (len + 0.5).toFixed(4), '-i', pc.path);
+            const vSp = spd !== 1 ? `,setpts=PTS/${spd.toFixed(5)}` : '';
+            graph.push(`[${n}:v]setpts=PTS-STARTPTS${vSp},fps=${fps},scale=${sz},setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=${Math.ceil(fps)},trim=end_frame=${nF},setpts=PTS-STARTPTS[${lab}]`);
+            n += 1;
+          }
+          parts.push(`[${lab}]`);
+        });
+        const c = L.crop;
+        const bw = ev(L.box.w);
+        const bh = ev(L.box.h);
+        const zoomed = !!L.zoom;
+        const chain = [
+          parts.length > 1 ? `${parts.join('')}concat=n=${parts.length}:v=1:a=0` : parts[0].slice(1, -1),
+        ];
+        const head = parts.length > 1 ? `${chain[0]}[rc${k}l${li}j];[rc${k}l${li}j]` : `[${chain[0]}]`;
+        const steps = [
+          `crop=${ev(c.w)}:${ev(c.h)}:${Math.max(0, Math.round(c.x))}:${Math.max(0, Math.round(c.y))}`,
+          `scale=${zoomed ? bw * 2 : bw}:${zoomed ? bh * 2 : bh}`,
+        ];
+        if (zoomed) steps.push(L.zoom.replace(/s=\d+x\d+/, `s=${bw}x${bh}`));
+        steps.push('setsar=1', 'format=rgba', `trim=duration=${DS}`, 'setpts=PTS-STARTPTS');
+        graph.push(`${head}${steps.join(',')}[rc${k}l${li}v]`);
+        let layer = `rc${k}l${li}v`;
+        if (L.mask) {
+          const mf = await writePng(L.mask, `rc${k}m${li}.png`);
+          inputs.push('-loop', '1', '-framerate', String(fps), '-t', DS, '-i', mf);
+          graph.push(`[${n}:v]format=gray,scale=${bw}:${bh},trim=duration=${DS},setpts=PTS-STARTPTS[rc${k}mk${li}]`);
+          graph.push(`[${layer}][rc${k}mk${li}]alphamerge[rc${k}la${li}]`);
+          layer = `rc${k}la${li}`;
+          n += 1;
+        }
+        graph.push(`[${acc}][${layer}]overlay=x=${Math.round(L.box.x)}:y=${Math.round(L.box.y)}:eof_action=pass[rc${k}a${li}]`);
+        acc = `rc${k}a${li}`;
+      }
+      const pl = plates[li + 1];
+      if (pl) {
+        graph.push(`[${pl}]format=rgba,trim=duration=${DS},setpts=PTS-STARTPTS[rc${k}q${li}]`);
+        graph.push(`[${acc}][rc${k}q${li}]overlay=eof_action=pass[rc${k}o${li}]`);
+        acc = `rc${k}o${li}`;
+      }
+    }
+    graph.push(`[${acc}]format=yuv420p,setpts=PTS-STARTPTS+${sp.A.toFixed(4)}/TB[rc${k}]`);
+    graph.push(`[${cur}][rc${k}]overlay=eof_action=pass:enable='between(t,${sp.A.toFixed(4)},${(sp.A + D - 0.5 / fps).toFixed(4)})'[rcv${k}]`);
+    cur = `rcv${k}`;
+  }
+  return { next: n, out: cur };
 }
 
 // ---------------------------------------------------------------- gallery
@@ -895,6 +1023,7 @@ async function galleryItemFromFolder(folder) {
       sidecars: fromOriginals && proj.sidecars && exists(abs(proj.sidecars.mic)) && exists(abs(proj.sidecars.sys))
         ? { mic: abs(proj.sidecars.mic), sys: abs(proj.sidecars.sys) } : null,
       finalPath: fromOriginals ? path.join(folder, `${title}.mp4`) : main,
+      layoutLog: fromOriginals ? await readLayoutLog(folder) : null,
       tracks: fromOriginals
         ? ['camera', 'screen'].filter((k) => exists(originalsAbs[k])).map((k) => ({
           key: k, source: originalsAbs[k], output: path.join(folder, `${title} - ${TRACK_LABEL[k]}.mp4`),
@@ -1091,7 +1220,41 @@ async function camctlIndex(label) {
 // ---------------------------------------------------------------- scenes (continue a recording)
 
 // Editor state kept in projeto.json (besides removed/inserts/audioDelay/title).
-const EDIT_KEYS = ['speeds', 'speed', 'zooms', 'overlays', 'fx', 'fxGlobal', 'audioFx', 'scenes'];
+const EDIT_KEYS = ['speeds', 'speed', 'zooms', 'overlays', 'fx', 'fxGlobal', 'audioFx', 'scenes', 'layouts'];
+
+// Layout log of a lesson (originais/layout.json): which layout, background and
+// screen area were on screen from each moment, so the editor can rebuild any
+// stretch from the camera and screen files. Background pictures are resolved
+// to file paths / URLs.
+async function readLayoutLog(folder) {
+  const odir = path.join(folder, 'originais');
+  let log;
+  try { log = JSON.parse(await fsp.readFile(path.join(odir, 'layout.json'), 'utf8')); } catch { return null; }
+  if (!Array.isArray(log) || !log.length) return null;
+  return log.map((e) => {
+    const f = e.bg ? path.join(odir, e.bg) : null;
+    return f && fs.existsSync(f) ? { ...e, bgPath: f, bgUrl: pathToFileURL(f).href } : { ...e, bg: null };
+  });
+}
+
+// Video stream signature (codec, profile, pixel format, size): files with the
+// same one can be joined without re-encoding.
+async function videoSig(file) {
+  const err = await new Promise((resolve) => {
+    const proc = spawn(ffmpegPath(), ['-hide_banner', '-i', file], { windowsHide: true });
+    let e = '';
+    proc.stderr.on('data', (d) => { e += d.toString(); });
+    proc.on('error', () => resolve(''));
+    proc.on('close', () => resolve(e));
+  });
+  const v = /Stream #\d+:\d+[^\n]*: Video: ([^\n]*)/.exec(err);
+  const a = /Stream #\d+:\d+[^\n]*: Audio: ([a-z0-9]+)[^\n]*?(\d+) Hz/.exec(err);
+  if (!v) return null;
+  const parts = v[1].split(',').map((x) => x.trim());
+  const size = (/(\d{2,5}x\d{2,5})/.exec(v[1]) || [])[1] || '';
+  const fps = (/([\d.]+) fps/.exec(v[1]) || [])[1] || '';
+  return `${parts[0]}|${(parts[1] || '').split('(')[0]}|${size}|${fps}|${a ? `${a[1]}@${a[2]}` : 'noaudio'}`;
+}
 
 // Joins recordings end to end without re-encoding (they come from the same
 // recorder settings); falls back to one re-encode if the copy is refused.
@@ -1099,6 +1262,8 @@ async function concatVideos(files, out) {
   const list = `${out}.lista.txt`;
   await fsp.writeFile(list, files.map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
   try {
+    const sigs = await Promise.all(files.map(videoSig));
+    if (sigs.some((x) => !x || x !== sigs[0])) throw new Error('different');
     await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', out]);
   } catch {
     const inputs = files.flatMap((f) => ['-i', f]);
@@ -1189,19 +1354,32 @@ async function appendScene(folder, done, meta, warnings) {
   const ids = new Set(scenes.map((s) => s.id));
   let id = `s${n}`;
   for (let i = n; ids.has(id); i += 1) id = `s${i + 1}`;
-  const nextScenes = [...scenes, { id, name: `Cena ${n}`, start: oldDur, end: info.duration || oldDur + newDur }];
+  const end = info.duration || oldDur + newDur;
+  const scene = { id, name: meta.sceneName || `Cena ${n}`, start: oldDur, end };
+  if (meta.sceneKind) scene.kind = meta.sceneKind; // 'image' | 'video': sent from a file
+  const nextScenes = [...scenes, scene];
+  // A picture scene is made long; only its first seconds are kept (drag its end in the timeline).
+  const removed = [...(proj.removed || [])];
+  if (meta.sceneKind === 'image' && meta.showFor && end - oldDur > meta.showFor + 0.1) removed.push([oldDur + meta.showFor, end]);
 
   let cursor = null;
   try { cursor = JSON.parse(await fsp.readFile(path.join(odir, 'cursor.json'), 'utf8')); } catch { /* none yet */ }
   if (Array.isArray(meta.cursor) && meta.cursor.length) {
-    cursor = [...(cursor || []), ...meta.cursor.map(([t, x, y]) => [Number((t + oldDur).toFixed(3)), x, y])];
+    cursor = [...(cursor || []), ...meta.cursor.map(([t, ...rest]) => [Number((t + oldDur).toFixed(3)), ...rest])];
   }
   if (cursor) await fsp.writeFile(path.join(odir, 'cursor.json'), JSON.stringify(cursor)).catch(() => {});
+  // layout log: the new scene's entries after the old ones (a scene from a file has no layout to rebuild)
+  let log = null;
+  try { log = JSON.parse(await fsp.readFile(path.join(odir, 'layout.json'), 'utf8')); } catch { /* none yet */ }
+  const addLog = Array.isArray(meta.layoutLog) && meta.layoutLog.length ? meta.layoutLog : [{ t: 0, media: true }];
+  log = [...(Array.isArray(log) ? log : [{ t: 0, media: true }]), ...addLog.map((e) => ({ ...e, t: Number((e.t + oldDur).toFixed(3)) }))];
+  await fsp.writeFile(path.join(odir, 'layout.json'), JSON.stringify(log)).catch(() => {});
 
   const saved = await writeProject(folder, {
     originals,
     sidecars,
     scenes: nextScenes,
+    removed,
     duration: info.duration,
     hasAudio: info.hasAudio,
     stereo: !!proj.stereo || !!meta.stereo,
@@ -1226,9 +1404,125 @@ async function appendScene(folder, done, meta, warnings) {
     audioDelay: saved.audioDelay,
     ...Object.fromEntries(EDIT_KEYS.map((k) => [k, saved[k]])),
     scenes: nextScenes,
+    layoutLog: await readLayoutLog(folder),
     newScene: id,
     warning: warnings[0] || null,
   };
+}
+
+// A file as a new scene: the picture fills the frame (fitted, black bars),
+// re-encoded to the lesson's size and frame rate, plus black camera / screen
+// files of the same length so the separate files stay in step.
+const IMAGE_SCENE_MAX = 120; // s: a picture scene can be stretched up to this in the timeline
+const IMAGE_SCENE_SHOW = 5; // s shown at first
+async function addMediaScene(folder, src) {
+  const proj = await readProject(folder);
+  const abs = (rel) => (rel ? path.join(folder, rel) : null);
+  if (!proj || !proj.originals || !fs.existsSync(abs(proj.originals.main) || '')) {
+    throw new Error('Os arquivos originais desta aula não existem mais: não dá para adicionar cenas.');
+  }
+  const info = await probe(src);
+  if (!info.hasVideo) throw new Error('Esse arquivo não tem imagem.');
+  const isImage = info.isImage || (/\.gif$/i.test(src) && info.duration <= 0.05);
+  const W = proj.width || 1920;
+  const H = proj.height || 1080;
+  const fps = proj.fps || 30;
+  const odir = path.join(folder, 'originais');
+  const stamp = Date.now().toString(36);
+  const main = path.join(odir, `cena-arquivo-${stamp}.mp4`);
+  const FIT = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
+  const D = isImage ? IMAGE_SCENE_MAX : info.duration;
+  if (!(D > 0.2)) throw new Error('Esse vídeo é curto demais.');
+  const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(fps),
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart'];
+  const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+  if (isImage) args.push('-loop', '1', '-framerate', String(fps), '-t', String(D), '-i', src);
+  else args.push('-i', src);
+  args.push('-f', 'lavfi', '-t', String(D), '-i', 'anullsrc=r=48000:cl=stereo');
+  const audio = !isImage && info.hasAudio ? `[0:a]${AUDIO_IN},apad,atrim=duration=${D.toFixed(3)}[a]` : `[1:a]${AUDIO_IN}[a]`;
+  args.push('-filter_complex', `[0:v]${FIT},trim=duration=${D.toFixed(3)},setpts=PTS-STARTPTS[v];${audio}`, '-map', '[v]', '-map', '[a]');
+  if (isImage) args.push('-tune', 'stillimage');
+  args.push(...enc, '-t', String(D), main);
+  await runFfmpeg(args);
+  const done = { main };
+  // black camera / screen files of the same length, at their sizes
+  for (const k of ['camera', 'screen']) {
+    const f = abs(proj.originals[k]);
+    if (!f || !fs.existsSync(f)) continue;
+    const ti = await probe(f);
+    const tw = Math.max(2, Math.round((ti.width || W) / 2) * 2);
+    const th = Math.max(2, Math.round((ti.height || H) / 2) * 2);
+    const out = path.join(odir, `cena-arquivo-${stamp}-${k}.mp4`);
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', `color=black:s=${tw}x${th}:r=${fps}:d=${D.toFixed(3)}`,
+      '-f', 'lavfi', '-t', String(D), '-i', 'anullsrc=r=48000:cl=stereo',
+      '-map', '0:v', '-map', '1:a', ...enc, '-t', String(D), out]);
+    done[k] = out;
+  }
+  const name = path.basename(src, path.extname(src)).slice(0, 40) || 'Arquivo';
+  return appendScene(folder, done, {
+    sceneName: name,
+    sceneKind: isImage ? 'image' : 'video',
+    showFor: isImage ? IMAGE_SCENE_SHOW : 0,
+    layoutLog: [{ t: 0, media: true }],
+    stereo: true,
+  }, []);
+}
+
+// Transition library: the user's clips are kept in the app's folder (pictures
+// become 2 s videos, so the editor can play them like any other clip).
+const TRANS_DIR = () => path.join(app.getPath('userData'), 'intro', 'transicoes');
+async function addTransition(src) {
+  const info = await probe(src);
+  if (!info.hasVideo) throw new Error('Esse arquivo não tem imagem.');
+  await fsp.mkdir(TRANS_DIR(), { recursive: true });
+  const id = `t${Date.now().toString(36)}`;
+  const isImage = info.isImage;
+  let dest = path.join(TRANS_DIR(), `${id}${isImage ? '.mp4' : path.extname(src).toLowerCase()}`);
+  if (isImage) {
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-loop', '1', '-framerate', '30', '-t', '2', '-i', src,
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-tune', 'stillimage', '-movflags', '+faststart', dest]);
+  } else {
+    await fsp.copyFile(src, dest);
+    if (!/\.(mp4|webm|m4v|mov)$/i.test(dest)) {
+      const mp4 = dest.replace(/\.[^.]+$/, '.mp4');
+      await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', dest, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', mp4]);
+      await fsp.rm(dest, { force: true });
+      dest = mp4;
+    }
+  }
+  const out = await probe(dest);
+  return {
+    id,
+    path: dest,
+    url: `${pathToFileURL(dest).href}?v=${Date.now()}`,
+    name: path.basename(src, path.extname(src)).slice(0, 40),
+    isImage: false,
+    width: out.width,
+    height: out.height,
+    hasAudio: out.hasAudio,
+    duration: Math.min(3, out.duration || 2),
+  };
+}
+
+// Ready-made transitions (generated once): a short black or white screen.
+const BUILTIN_TRANS = [
+  { id: 'preto', name: 'Tela preta', color: 'black', d: 1 },
+  { id: 'branco', name: 'Tela branca', color: 'white', d: 0.6 },
+];
+async function builtinTransitions() {
+  await fsp.mkdir(TRANS_DIR(), { recursive: true });
+  const out = [];
+  for (const b of BUILTIN_TRANS) {
+    const f = path.join(TRANS_DIR(), `pronta-${b.id}.mp4`);
+    if (!fs.existsSync(f)) {
+      await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=${b.color}:s=640x360:r=30:d=${b.d}`,
+        '-f', 'lavfi', '-t', String(b.d), '-i', 'anullsrc=r=48000:cl=stereo', '-map', '0:v', '-map', '1:a',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-t', String(b.d), '-movflags', '+faststart', f]).catch(() => {});
+    }
+    if (fs.existsSync(f)) out.push({ id: b.id, builtin: true, path: f, url: pathToFileURL(f).href, name: b.name, isImage: false, hasAudio: false, duration: b.d });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- IPC
@@ -1473,7 +1767,7 @@ function registerIpc() {
         const isScreen = s.id.startsWith('screen');
         const display = isScreen ? displays.find((d) => String(d.id) === String(s.display_id)) : null;
         const thumb = s.thumbnail.getSize();
-        const px = display ? screen.dipToScreenRect(null, display.bounds) : null;
+        const px = display ? (screen.dipToScreenRect ? screen.dipToScreenRect(null, display.bounds) : display.bounds) : null;
         return {
           id: s.id,
           name: s.name,
@@ -1624,6 +1918,9 @@ function registerIpc() {
     if (Array.isArray(meta.cursor) && meta.cursor.length) {
       await fsp.writeFile(path.join(folder, 'originais', 'cursor.json'), JSON.stringify(meta.cursor)).catch(() => {});
     }
+    if (Array.isArray(meta.layoutLog) && meta.layoutLog.length) {
+      await fsp.writeFile(path.join(folder, 'originais', 'layout.json'), JSON.stringify(meta.layoutLog)).catch(() => {});
+    }
     await writeProject(folder, {
       sidecars: done.mic && done.sys ? { mic: rel(done.mic), sys: rel(done.sys) } : null,
       scenes: [{ id: 's1', name: 'Cena 1', start: 0, end: info.duration }],
@@ -1657,9 +1954,30 @@ function registerIpc() {
       })),
       scenes: [{ id: 's1', name: 'Cena 1', start: 0, end: info.duration }],
       sidecars: done.mic && done.sys ? { mic: done.mic, sys: done.sys } : null,
+      layoutLog: await readLayoutLog(folder),
       warning: warnings[0] || null,
     };
   });
+
+  // A picture saved next to the recording (the background, for the layout log).
+  ipcMain.handle('rec:asset', async (_e, name, dataUrl) => {
+    if (!rec || !/^[\w -]+\.(jpe?g|png)$/i.test(name) || !/^data:image\//.test(dataUrl)) return null;
+    let file = name;
+    for (let i = 2; fs.existsSync(path.join(rec.originalsDir, file)); i += 1) file = name.replace(/(\.\w+)$/, ` (${i})$1`);
+    await fsp.writeFile(path.join(rec.originalsDir, file), Buffer.from(dataUrl.split(',')[1], 'base64'));
+    return file;
+  });
+
+  // A video or a picture added as a new scene at the end of the lesson.
+  ipcMain.handle('scene:pick', async () => {
+    const res = await dialog.showOpenDialog(mainWin, {
+      title: 'Escolha um vídeo ou uma imagem para a nova cena',
+      properties: ['openFile'],
+      filters: [{ name: 'Vídeo ou imagem', extensions: ['mp4', 'mov', 'webm', 'mkv', 'm4v', 'avi', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] }],
+    });
+    return res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
+  });
+  ipcMain.handle('scene:add', (_e, folder, file) => addMediaScene(folder, file));
 
   ipcMain.handle('camera:controls', async (_e, label) => {
     if (!camctlPath()) return { supported: false };
@@ -1688,6 +2006,7 @@ function registerIpc() {
 
   // --- gallery
   ipcMain.handle('gallery:list', (_e, dir) => listGallery(dir || defaultOutDir()));
+  ipcMain.handle('gallery:item', (_e, folder) => (folder && fs.existsSync(folder) ? galleryItemFromFolder(folder) : null));
   ipcMain.handle('gallery:rename', (_e, item, title) => renameItem(item, title));
   ipcMain.handle('gallery:trash', async (_e, item) => {
     const target = item.kind === 'project' ? item.folder : item.main;
@@ -1735,6 +2054,21 @@ function registerIpc() {
       await fsp.rename(tmpOut, out);
     }
     return pathToFileURL(out).href;
+  });
+
+  ipcMain.handle('transition:builtin', () => builtinTransitions());
+  ipcMain.handle('transition:add', async () => {
+    const res = await dialog.showOpenDialog(mainWin, {
+      title: 'Escolha o vídeo (ou a imagem) da transição',
+      properties: ['openFile'],
+      filters: [{ name: 'Vídeo ou imagem', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', 'png', 'jpg', 'jpeg', 'webp'] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    return addTransition(res.filePaths[0]);
+  });
+  ipcMain.handle('transition:remove', async (_e, file) => {
+    if (file && path.dirname(file) === TRANS_DIR() && !path.basename(file).startsWith('pronta-')) await fsp.rm(file, { force: true }).catch(() => {});
+    return true;
   });
 
   ipcMain.handle('dialog:intro', async (_e, slot = 'h') => {

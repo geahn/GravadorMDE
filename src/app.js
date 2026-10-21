@@ -47,7 +47,11 @@ const prefs = {
   openEditor: true,
   levelAudio: true,
   keepOriginal: false,
-  recordMode: 'final', // 'final' | 'all' (final + camera + screen)
+  // Camera and screen are always recorded apart too (to change the layout later);
+  // this only says what is kept after exporting: 'final' = only the final video,
+  // 'all' = asks whether to keep the three files for editing later.
+  recordMode: 'all',
+  transitions: [], // transition clips registered by the user { id, path, url, name, duration, hasAudio }
   intro: null, // horizontal intro { path, url, name, isImage, hasAudio, duration }
   introV: null, // vertical intro
   introEnabled: true,
@@ -71,6 +75,15 @@ const prefs = {
   ...(saved.prefs || {}),
 };
 if (!QUALITY[prefs.quality]) prefs.quality = 'standard';
+if (!prefs.modeV2) {
+  // v2.1: "3 arquivos" became the default (the camera and the screen are what make the layout editable later)
+  prefs.modeV2 = true;
+  prefs.recordMode = 'all';
+  // the single "a few moments later" clips became the first entries of the transition library
+  const old = [['transition', 'Transição'], ['transitionV', 'Transição vertical']].filter(([k]) => prefs[k] && prefs[k].path);
+  prefs.transitions = [...(prefs.transitions || []), ...old.map(([k, n]) => ({ ...prefs[k], id: `t-${k}`, name: prefs[k].name || n }))];
+}
+if (!Array.isArray(prefs.transitions)) prefs.transitions = [];
 
 let screenAspect = saved.screenAspect || 16 / 9;
 
@@ -189,7 +202,11 @@ const cutter = new Cutter({
   toast: (...a) => toast(...a),
   confirm: (o) => confirmBox(o),
   getIntro: (project) => ({ intro: introFor(orientationOfProject(project || {})), enabled: prefs.introEnabled }),
-  getTransition: (project) => transitionFor(orientationOfProject(project || {})) || null,
+  getTransitions: () => transitionLibrary(),
+  pickTransition: (opts) => openTransitionPicker(opts),
+  getLayoutFormats: (o) => JSON.parse(JSON.stringify(S.layouts[o === 'v' ? 'v' : 'h'])),
+  addLayoutFormat: (o, layout) => addLayoutFormat(o, layout),
+  getStudioBg: () => ({ url: compositor.backgroundPlate('image/jpeg') }),
   getAudioDelay: () => prefs.audioDelay,
   onAudioDelay: (ms) => { prefs.audioDelay = ms; persist(); },
   onSetupTransition: () => openSettings('transition'),
@@ -198,6 +215,24 @@ const cutter = new Cutter({
   getPrefs: () => prefs,
   setPrefs: (patch) => { Object.assign(prefs, patch); persist(); },
   onNewScene: (project) => beginSceneAppend(project),
+  onBusy: (on, title) => showBusy(on, title),
+  onSceneAdded: (project, res) => {
+    gallery.markStale();
+    if (res.warning) toast(res.warning, 'error', 9000);
+    toast(`Nova cena “${(res.scenes || []).slice(-1)[0]?.name || ''}” no fim da aula. Arraste na faixa Cenas para mudar a ordem.`, 'ok', 7000);
+    cutter.open({
+      ...res,
+      original: true,
+      stereo: true,
+      orientation: project.orientation,
+      width: project.width,
+      height: project.height,
+      screenCrop: project.screenCrop || null,
+      duration: res.duration,
+      removed: res.removed || [],
+      introApplied: false,
+    });
+  },
   onCameraFilter: (f) => setCameraFilter(f),
   onExportAudio: (format) => exportAudio(format),
   onClose: (why) => {
@@ -1713,6 +1748,128 @@ function bindSources() {
   $('#sources-done').addEventListener('click', closeSources);
 }
 
+// ================================================================== transition library
+
+let builtinTrans = [];
+api.transitions.builtin().then((list) => { builtinTrans = list || []; renderTransList($('#set-trans-list'), { manage: true }); }).catch(() => {});
+
+// The user's clips first, then the ready-made ones.
+function transitionLibrary() {
+  return [...(prefs.transitions || []).filter((t) => t && t.path), ...builtinTrans];
+}
+
+function transCard(t, { on = false, manage = false } = {}) {
+  return `<div class="trans-card ${on ? 'on' : ''}" data-trans="${esc(t.id)}" title="${esc(t.name)}">
+      <div class="trans-thumb"><video src="${esc(t.url)}#t=0.4" muted preload="metadata"></video></div>
+      <b>${esc(t.name)}</b><small>${fmtLen(t.duration)}${t.builtin ? ' · pronta' : ''}</small>
+      ${!t.builtin && manage ? `<button class="trans-del" data-trans-del="${esc(t.id)}" title="Excluir">${icon('x', 12)}</button>` : ''}
+    </div>`;
+}
+
+function renderTransList(root, { manage = false, current = null } = {}) {
+  if (!root) return;
+  const list = transitionLibrary();
+  root.innerHTML = list.length ? list.map((t) => transCard(t, { on: t.id === current, manage })).join('')
+    : '<p class="set-note">Nenhuma transição ainda.</p>';
+  // a still from the middle of each clip
+  root.querySelectorAll('video').forEach((v) => v.addEventListener('mouseenter', () => { v.currentTime = 0; v.play().catch(() => {}); }));
+  root.querySelectorAll('video').forEach((v) => v.addEventListener('mouseleave', () => { v.pause(); }));
+}
+
+async function addTransitionFile() {
+  try {
+    const t = await api.transitions.add();
+    if (!t) return null;
+    prefs.transitions = [...(prefs.transitions || []), t];
+    persist();
+    toast(`Transição “${t.name}” adicionada.`, 'ok');
+    return t;
+  } catch (err) {
+    toast(`Não foi possível usar esse arquivo. ${cleanError(err)}`, 'error');
+    return null;
+  }
+}
+
+function removeTransition(id) {
+  const t = (prefs.transitions || []).find((x) => x.id === id);
+  if (!t) return;
+  prefs.transitions = prefs.transitions.filter((x) => x.id !== id);
+  persist();
+  // files of transitions saved before the library stay (older projects may use them)
+  if (t.path && /transicoes/.test(t.path)) api.transitions.remove(t.path);
+}
+
+// Picker opened by the editor's "Transição" button: one click applies.
+//   opts: { current: id | null, has: bool, onPick(id), onRemove() }
+let transPick = null;
+function openTransitionPicker(opts) {
+  transPick = opts;
+  const m = $('#trans-modal');
+  $('#trans-note').textContent = opts.has ? 'Clique em outra para trocar, ou tire a transição desta emenda.' : 'Clique em uma para colocá-la aqui.';
+  $('#trans-remove').hidden = !opts.has;
+  renderTransList($('#trans-grid'), { manage: true, current: opts.current });
+  m.hidden = false;
+}
+
+function bindTransitions() {
+  const grid = $('#trans-grid');
+  grid.addEventListener('click', (e) => {
+    const del = e.target.closest('[data-trans-del]');
+    if (del) {
+      e.stopPropagation();
+      removeTransition(del.dataset.transDel);
+      renderTransList(grid, { manage: true, current: transPick && transPick.current });
+      cutter.refreshIntro();
+      return;
+    }
+    const card = e.target.closest('[data-trans]');
+    if (!card || !transPick) return;
+    $('#trans-modal').hidden = true;
+    const pick = transPick;
+    transPick = null;
+    pick.onPick(card.dataset.trans);
+  });
+  $('#trans-add').addEventListener('click', async () => {
+    const t = await addTransitionFile();
+    if (!t) return;
+    renderTransList(grid, { manage: true, current: transPick && transPick.current });
+    cutter.refreshIntro();
+  });
+  $('#trans-remove').addEventListener('click', () => {
+    $('#trans-modal').hidden = true;
+    const pick = transPick;
+    transPick = null;
+    if (pick && pick.onRemove) pick.onRemove();
+  });
+  $('#set-trans-add').addEventListener('click', async () => {
+    if (await addTransitionFile()) renderTransList($('#set-trans-list'), { manage: true });
+  });
+  $('#set-trans-list').addEventListener('click', (e) => {
+    const del = e.target.closest('[data-trans-del]');
+    if (!del) return;
+    removeTransition(del.dataset.transDel);
+    renderTransList($('#set-trans-list'), { manage: true });
+  });
+}
+
+// "Novo formato" in the editor's Layout tab: a layout registered for the studio too.
+function addLayoutFormat(o, layout) {
+  const key = o === 'v' ? 'v' : 'h';
+  const list = S.layouts[key];
+  if (list.length >= MAX_LAYOUTS) {
+    toast(`Você pode ter até ${MAX_LAYOUTS} layouts em cada formato. Apague um no estúdio para cadastrar outro.`);
+    return null;
+  }
+  const names = new Set(list.map((l) => l.name.toLowerCase()));
+  let name = String(layout.name || 'Meu layout').slice(0, 40);
+  for (let i = 2; names.has(name.toLowerCase()); i += 1) name = `${String(layout.name || 'Meu layout').slice(0, 36)} ${i}`;
+  const entry = sanitizeLayout({ ...JSON.parse(JSON.stringify(layout)), id: newId(), name, custom: true }, key);
+  list.push(entry);
+  persist();
+  if (key === S.orientation) renderAll();
+  return entry;
+}
+
 // ================================================================== settings modal
 
 const fmtLen = (sec) => (sec < 60 ? `${Math.round(sec * 10) / 10} s`.replace('.', ',') : fmtTime(sec * 1000, false));
@@ -1737,7 +1894,8 @@ function renderSettings() {
 }
 
 function renderIntroSettings() {
-  for (const slot of ['h', 'v', 'th', 'tv']) {
+  renderTransList($('#set-trans-list'), { manage: true });
+  for (const slot of ['h', 'v']) {
     const card = $(`.intro-card[data-slot="${slot}"]`);
     const isTrans = slot.startsWith('t');
     const intro = prefs[INTRO_KEY[slot]];
@@ -1921,11 +2079,16 @@ function bindModals() {
   });
 }
 
-function confirmBox({ title, text, ok = 'OK', cancel = 'Cancelar', danger = false }) {
+// Resolves true (ok), false (cancel / Esc) or 'alt' (the optional third button).
+function confirmBox({ title, text, ok = 'OK', cancel = 'Cancelar', danger = false, alt = null }) {
   return new Promise((resolve) => {
     const m = $('#confirm-modal');
     const okB = $('#confirm-ok');
     const cancelB = $('#confirm-cancel');
+    const altB = $('#confirm-alt');
+    altB.hidden = !alt;
+    altB.textContent = alt || '';
+    altB.onclick = () => done('alt');
     $('#confirm-title').textContent = title;
     $('#confirm-text').textContent = text;
     okB.textContent = ok;
@@ -1944,6 +2107,7 @@ function confirmBox({ title, text, ok = 'OK', cancel = 'Cancelar', danger = fals
       m.hidden = true;
       okB.onclick = null;
       cancelB.onclick = null;
+      altB.onclick = null;
       m.onclick = null;
       document.removeEventListener('keydown', onKey, true);
       resolve(value);
@@ -2095,9 +2259,8 @@ async function startRecording() {
   if (R.append && R.append.orientation !== S.orientation) setOrientation(R.append.orientation);
   R.state = 'arming';
   setRecUI();
-  const tracks = prefs.recordMode === 'all'
-    ? ['camera', 'screen'].filter((k) => feeds[k] && feeds[k].track.readyState === 'live')
-    : [];
+  // Always: the camera and the screen go to their own files too (layouts can be changed in the editor).
+  const tracks = ['camera', 'screen'].filter((k) => feeds[k] && feeds[k].track.readyState === 'live');
   const ext = mime.startsWith('video/mp4') ? '.mp4' : mime.includes('matroska') ? '.mkv' : '.webm';
   // Microphone and computer audio also saved apart, to balance them in the editor.
   const audioMime = ['audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t));
@@ -2127,12 +2290,20 @@ async function startRecording() {
   R.clones = [];
   const videoTrack = compositor.startOutput(prefs.fps);
   R.recorders.main = makeRecorder('main', new MediaStream([videoTrack, mixer.track]), mime);
-  // Separate files: the raw camera and screen, each with the same audio mix.
+  // Separate files, each with the same audio mix: the screen as captured and the
+  // camera as it looks in the video (beauty, filter, rotation, mirror).
   for (const key of tracks) {
-    const clone = feeds[key].track.clone();
-    R.clones.push(clone);
-    R.recorders[key] = makeRecorder(key, new MediaStream([clone, mixer.track]), mime);
+    let track;
+    if (key === 'camera') track = compositor.startCamOutput(prefs.fps);
+    else {
+      track = feeds[key].track.clone();
+      R.clones.push(track);
+    }
+    R.recorders[key] = makeRecorder(key, new MediaStream([track, mixer.track]), mime);
   }
+  R.layoutLog = [];
+  R.layoutSig = '';
+  R.bgFiles = new Map();
   if (sidecars.length) {
     R.recorders.mic = makeRecorder('mic', new MediaStream([mixer.micTrack]), audioMime);
     R.recorders.sys = makeRecorder('sys', new MediaStream([mixer.sysTrack]), audioMime);
@@ -2152,6 +2323,7 @@ function beginRecording() {
   R.pausedTotal = 0;
   R.pausedAt = 0;
   R.state = 'recording';
+  logLayout();
   setRecUI();
   api.ui.recordingStarted({ layouts: barLayouts(), active: activeIndex(), orientation: S.orientation });
   sendBarStatus();
@@ -2162,6 +2334,7 @@ function releaseRecorders() {
   R.clones = [];
   R.recorders = {};
   compositor.stopOutput();
+  compositor.stopCamOutput();
 }
 
 async function cancelCountdown() {
@@ -2221,6 +2394,7 @@ async function stopRecording({ discard = false } = {}) {
         mime: R.mime,
         meta: {
           orientation: R.orientation, width: d.w, height: d.h, fps: prefs.fps, stereo: R.stereo, screenCrop: activeCrop(), cursor: R.cursor || [],
+          layoutLog: await finishLayoutLog(),
         },
       });
       if (res.warning) toast(res.warning, 'error', 9000);
@@ -2309,11 +2483,26 @@ const PHASE_LABEL = {
 };
 
 async function exportProject(project, {
-  seq, removed, inserts, audioDelay, intro, transition, title, post, audioFx, sidecars, edits,
+  seq, removed, inserts, audioDelay, intro, transition, transitions, title, post, audioFx, sidecars, edits,
 }) {
+  // What stays after exporting: "1 arquivo" = only the final video; "3 arquivos" = ask.
+  let keep = !project.original;
+  if (project.original && project.folder) {
+    if (prefs.recordMode === 'all') {
+      const ans = await confirmBox({
+        title: 'Guardar os arquivos para editar depois?',
+        text: 'Mantendo, o vídeo final é exportado e a gravação (câmera, tela e áudio) fica salva: dá para abrir de novo no editor e mudar cenas, layouts, textos, cortes… Sem guardar, fica só o vídeo final (os arquivos de gravação vão para a Lixeira).',
+        ok: 'Guardar os 3 arquivos',
+        alt: 'Só o vídeo final',
+        cancel: 'Cancelar',
+      });
+      if (ans === false) return false;
+      keep = ans === true;
+    } else keep = false;
+  }
   EXP.start = 0;
   EXP.intro = !!intro;
-  EXP.tracks = (project.tracks || []).length;
+  EXP.tracks = keep ? (project.tracks || []).length : 0;
   $('#exp-title').textContent = EXP.tracks ? `Exportando ${EXP.tracks + 1} arquivos…` : 'Exportando o vídeo…';
   setExportProgress({ phase: prefs.levelAudio && project.hasAudio !== false ? 'audio' : 'video', pct: 0, overall: 0 });
   $('#export-overlay').hidden = false;
@@ -2322,7 +2511,7 @@ async function exportProject(project, {
       folder: project.folder || null,
       source: project.path,
       output: project.finalPath,
-      tracks: project.tracks || [],
+      tracks: keep ? (project.tracks || []) : [],
       duration: project.duration,
       width: project.width,
       height: project.height,
@@ -2333,13 +2522,14 @@ async function exportProject(project, {
       audioDelay: Number.isFinite(audioDelay) ? audioDelay : prefs.audioDelay,
       intro,
       transition: transition || null,
+      transitions: transitions || null,
       introApplied: !!project.introApplied,
       fps: prefs.fps,
       crf: QUALITY[prefs.quality].crf,
       stereo: project.stereo,
       level: prefs.levelAudio,
       hasAudio: project.hasAudio !== false,
-      trashOriginals: project.original && !prefs.keepOriginal,
+      trashOriginals: !!project.original && !keep,
       post: post || null,
       audioFx: audioFx || null,
       sidecars: sidecars || null,
@@ -2430,7 +2620,8 @@ function showResult(res, project, lesson = {}) {
   }
   const notes = [];
   if (res.tracks && res.tracks.length) notes.push(`Também salvos: ${res.tracks.map((t) => (t.key === 'camera' ? 'câmera' : 'tela')).join(' e ')} separadas, com os mesmos cortes e áudio.`);
-  if (res.sourceTrashed) notes.push('A gravação bruta foi para a Lixeira (dá para recuperar de lá).');
+  if (res.sourceTrashed) notes.push('Os arquivos de gravação foram para a Lixeira (dá para recuperar de lá).');
+  if (res.originalsKept) notes.push('A gravação ficou guardada: dá para continuar editando quando quiser (Galeria → Editar).');
   if (lesson.mdeStarted) notes.push('Enviando para a Comunidade MDE: acompanhe na barra do topo ou na Galeria.');
   openResultModal({
     mde: lesson.folder && !lesson.mdeStarted ? { folder: lesson.folder, file: res.path, title: lesson.title } : null,
@@ -2440,6 +2631,11 @@ function showResult(res, project, lesson = {}) {
     url: res.url,
     path: res.path,
     primary: 'Nova gravação',
+    onEdit: res.originalsKept && lesson.folder ? async () => {
+      const item = await api.gallery.item(lesson.folder).catch(() => null);
+      if (item) editItem(item);
+      else toast('Não encontrei a aula para editar.', 'error');
+    } : null,
   });
 }
 
@@ -2483,6 +2679,8 @@ function editItem(item) {
     speeds: e.speeds,
     speed: e.speed,
     zooms: e.zooms,
+    layouts: e.layouts,
+    layoutLog: e.layoutLog || null,
     overlays: e.overlays,
     fx: e.fx,
     fxGlobal: e.fxGlobal,
@@ -2538,7 +2736,9 @@ const ticker = createTicker((now) => {
   compositor.draw(now);
   if (R.state === 'recording') {
     compositor.pushFrame();
+    compositor.pushCamFrame();
     sampleCursor(now);
+    if (tickCount % 6 === 0) logLayout();
   }
 
   tickCount += 1;
@@ -2606,7 +2806,9 @@ function bindStudio() {
     prefs.recordMode = b.dataset.v;
     persist();
     renderRecMode();
-    if (prefs.recordMode === 'all') toast('Além do vídeo final, a câmera e a tela serão salvas em arquivos separados, cada um com o áudio.', 'info', 5000);
+    toast(prefs.recordMode === 'all'
+      ? 'A câmera e a tela são gravadas separadas. Ao exportar, você escolhe se guarda os 3 arquivos para editar depois.'
+      : 'A câmera e a tela são gravadas separadas para editar. Ao exportar, ficam só o vídeo final (os arquivos de gravação vão para a Lixeira).', 'info', 6500);
   });
 
   const grid = $('#layout-grid');
@@ -2813,17 +3015,59 @@ function sampleCursor(now) {
     if (R.state !== 'recording' || !R.cursor) return;
     const d = compositor.display.screen;
     const size = compositor.sourceSize('screen');
-    if (!p || !d || d.op < 0.5 || !size) { R.cursor.push([Number(t.toFixed(3)), -1, -1]); return; }
+    const T = Number(t.toFixed(3));
+    if (!p) { R.cursor.push([T, -1, -1]); return; }
     let fx = p.x;
     let fy = p.y;
     const c = compositor.crops.screen;
     if (c) { fx = (fx - c.x) / c.w; fy = (fy - c.y) / c.h; }
-    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) { R.cursor.push([Number(t.toFixed(3)), -1, -1]); return; }
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) { R.cursor.push([T, -1, -1]); return; }
+    // 4th/5th values: where the mouse is on the screen itself (for zooms inside the screen layer)
+    const raw = [Number(fx.toFixed(4)), Number(fy.toFixed(4))];
+    if (!d || d.op < 0.5 || !size) { R.cursor.push([T, -1, -1, ...raw]); return; }
     const v = cropFor(d, size.w, size.h);
     const X = d.x + ((fx * size.w - v.sx) / v.vw) * d.w;
     const Y = d.y + ((fy * size.h - v.sy) / v.vh) * d.h;
-    R.cursor.push([Number(t.toFixed(3)), Number((X / compositor.W).toFixed(4)), Number((Y / compositor.H).toFixed(4))]);
+    R.cursor.push([T, Number((X / compositor.W).toFixed(4)), Number((Y / compositor.H).toFixed(4)), ...raw]);
   }).catch(() => { R.cursorBusy = false; });
+}
+
+// ================================================================== layout log (to change the layout in the editor)
+
+// Every change of layout / background / screen area while recording is noted
+// with its time, so the editor can rebuild any stretch from the camera and
+// screen files with another layout (or zoom into one of them).
+function logLayout() {
+  if (!R.layoutLog || !compositor.sceneTarget) return;
+  const bgKey = `${JSON.stringify(S.bg)}|${compositor.W}x${compositor.H}`;
+  // a picture background still loading: wait for it
+  if ((S.bg.key === 'image' || S.bg.key === 'pattern') && !compositor.bgCanvas) return;
+  const sizeOf = (k) => {
+    const z = compositor.sourceSize(k);
+    return z ? { w: Math.round(z.w), h: Math.round(z.h) } : null;
+  };
+  const entry = {
+    scene: compositor.sceneTarget,
+    crops: { screen: compositor.crops.screen || null, camera: compositor.crops.camera || null },
+    size: { screen: sizeOf('screen'), camera: compositor.camOut ? sizeOf('camera') : null },
+    bgKey,
+  };
+  const sig = JSON.stringify(entry);
+  if (sig === R.layoutSig) return;
+  R.layoutSig = sig;
+  if (!R.bgFiles.has(bgKey)) {
+    const n = R.bgFiles.size + 1;
+    R.bgFiles.set(bgKey, api.rec.asset(`fundo-${n}.jpg`, compositor.backgroundPlate()).catch(() => null));
+  }
+  R.layoutLog.push({ t: Number((elapsed() / 1000).toFixed(3)), ...JSON.parse(sig) });
+}
+
+async function finishLayoutLog() {
+  const log = R.layoutLog || [];
+  R.layoutLog = null;
+  const files = new Map();
+  for (const [k, p] of R.bgFiles || []) files.set(k, await p);
+  return log.map(({ bgKey, ...e }) => ({ ...e, bg: files.get(bgKey) || null }));
 }
 
 // ================================================================== camera filter / computer audio volume
@@ -3232,6 +3476,7 @@ bindProps();
 bindSources();
 bindSettings();
 bindModals();
+bindTransitions();
 bindStudio();
 bindRecordingEvents();
 renderAll();
