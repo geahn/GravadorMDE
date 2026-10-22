@@ -2466,9 +2466,28 @@ function sendBarStatus() {
   });
 }
 
+// The note under the title changes the longer it takes.
+const BUSY_NOTES = [
+  [600, 'Putz, não perca a paciência comigo...'],
+  [300, 'Mil perdões! Estou demorando mais do que o prometido.'],
+  [60, 'Ops. Acho que errei, disse segundos?<br>Isso pode levar só alguns MINUTOS, tá ok?'],
+  [0, 'Isso leva só alguns segundos.'],
+];
+let busyTimer = null;
 function showBusy(on, title = 'Finalizando seu vídeo…') {
   $('#busy').hidden = !on;
   $('#busy-title').textContent = title;
+  clearInterval(busyTimer);
+  busyTimer = null;
+  const note = $('#busy-note');
+  note.innerHTML = BUSY_NOTES[BUSY_NOTES.length - 1][1];
+  if (!on) return;
+  const start = Date.now();
+  busyTimer = setInterval(() => {
+    const s = (Date.now() - start) / 1000;
+    const html = BUSY_NOTES.find(([t]) => s >= t)[1];
+    if (note.innerHTML !== html) note.innerHTML = html;
+  }, 1000);
 }
 
 // ================================================================== export

@@ -62,6 +62,12 @@ export class Cutter {
     // lip-sync delay; the video players stay muted. (Routing several players
     // through Web Audio made Chromium drop most frames and stall.)
     this.audio = $('#cut-audio');
+    this.audio.addEventListener('seeked', () => {
+      const w = this.audioWant;
+      this.audioWant = null;
+      if (w != null && this.playing && Math.abs(this.audio.currentTime - w) > 0.12) this.audio.currentTime = w;
+    });
+    this.audio.addEventListener('error', () => { if (this.playing) this.watchAudio(); });
     for (const v of this.players) v.muted = true;
     this.thumbVideo = $('#cut-thumb-video');
     this.scroller = $('#cut-scroller');
@@ -334,8 +340,47 @@ export class Cutter {
       if (!au.paused) au.pause(); // the first moments: the delayed audio has not started yet
       return;
     }
-    if (force || Math.abs(au.currentTime - want) > 0.08) au.currentTime = want;
+    if (this.ac && this.ac.state !== 'running') this.ac.resume().catch(() => {});
+    // While a seek is still running, asking for another one restarts it: when
+    // the timeline is scrubbed the sound could keep seeking forever (silence).
+    // Only the last position is kept, and applied once the seek ends.
+    if (au.seeking) {
+      this.audioWant = want;
+    } else if (force || Math.abs(au.currentTime - want) > 0.12) {
+      this.audioWant = null;
+      au.currentTime = want;
+    }
     if (au.paused) au.play().catch(() => {});
+    this.watchAudio();
+  }
+
+  // Watchdog: the sound should be moving while the video plays. If it is
+  // stuck (decoder error, endless seek, audio output suspended), revive it.
+  watchAudio() {
+    const au = this.audio;
+    const now = performance.now();
+    const t = au.currentTime;
+    const w = this.audioWatch || (this.audioWatch = { t, at: now, fixes: 0 });
+    if (Math.abs(t - w.t) > 0.01 || au.paused) { w.t = t; w.at = now; return; }
+    if (now - w.at < 900) return;
+    w.at = now;
+    w.fixes += 1;
+    const want = this.active.currentTime - this.audioDelay / 1000;
+    if (this.ac && this.ac.state !== 'running') this.ac.resume().catch(() => {});
+    if (au.error || w.fixes % 2 === 0) {
+      // reload the element (keeps the Web Audio routing: same element)
+      const src = this.p && this.p.url;
+      if (src) {
+        au.src = src;
+        au.addEventListener('loadedmetadata', () => {
+          au.currentTime = Math.max(0, want);
+          if (this.playing) au.play().catch(() => {});
+        }, { once: true });
+        return;
+      }
+    }
+    au.currentTime = Math.max(0, want);
+    au.play().catch(() => {});
   }
 
   applyDelay() {
