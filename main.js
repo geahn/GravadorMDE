@@ -1323,9 +1323,16 @@ async function appendScene(folder, done, meta, warnings) {
   for (const k of ['mic', 'sys']) if (exists(done[k])) await fsp.rm(done[k], { force: true });
 
   // Picture (+ the mixed audio) and the separate camera/screen files.
-  const joinInto = async (oldFile, newFile, name) => {
+  // Nothing recorded before is ever thrown away here: the old file is only
+  // replaced once the joined one exists and has the full length.
+  const joinInto = async (oldFile, newFile, name, want) => {
     const tmpOut = path.join(odir, `${name} (unindo).mp4`);
     await concatVideos([oldFile, newFile], tmpOut);
+    const got = (await probe(tmpOut)).duration || 0;
+    if (want && got < want - 1.5) {
+      await fsp.rm(tmpOut, { force: true }).catch(() => {});
+      throw new Error(`Não consegui juntar a nova cena ao arquivo “${name}”. Os arquivos da aula não foram alterados.`);
+    }
     const target = path.join(odir, `${name}.mp4`);
     await fsp.rm(oldFile, { force: true });
     await fsp.rm(newFile, { force: true });
@@ -1334,20 +1341,33 @@ async function appendScene(folder, done, meta, warnings) {
     createdFiles.add(target);
     return target;
   };
-  const mainOut = await joinInto(oldMain, done.main, 'final');
-  originals.main = rel(mainOut);
+  // A scene recorded without the camera (or the screen): that file gets a black
+  // stretch of the same length, so camera and screen stay complete and in step.
+  const temps = [];
+  const pad = async (k, dur, likeFile) => {
+    const out = path.join(odir, `${k}-preto-${Date.now().toString(36)}.mp4`);
+    await blackClip(out, dur, likeFile, proj.fps || 30);
+    temps.push(out);
+    return out;
+  };
+  const trackJobs = [];
   for (const k of ['camera', 'screen']) {
     const oldF = abs(originals[k]);
-    if (exists(oldF) && exists(done[k])) {
-      originals[k] = rel(await joinInto(oldF, done[k], k === 'camera' ? 'camera' : 'tela'));
-    } else if (exists(oldF)) {
-      await shell.trashItem(oldF).catch(() => fsp.rm(oldF, { force: true }));
-      originals[k] = null;
-      warnings.push(`A nova cena foi gravada sem o arquivo separado da ${TRACK_LABEL[k]}; esse arquivo separado foi descartado para não ficar incompleto.`);
-    } else if (exists(done[k])) {
-      await fsp.rm(done[k], { force: true });
+    const has = exists(oldF);
+    const hasNew = exists(done[k]);
+    if (!has && !hasNew) continue;
+    trackJobs.push({ k, a: has ? oldF : await pad(k, oldDur, done[k]), b: hasNew ? done[k] : await pad(k, newDur, oldF) });
+  }
+  const mainOut = await joinInto(oldMain, done.main, 'final', oldDur + newDur);
+  originals.main = rel(mainOut);
+  for (const j of trackJobs) {
+    try {
+      originals[j.k] = rel(await joinInto(j.a, j.b, j.k === 'camera' ? 'camera' : 'tela', oldDur + newDur));
+    } catch (err) {
+      warnings.push(`${err.message} (${TRACK_LABEL[j.k]})`);
     }
   }
+  for (const f of temps) await fsp.rm(f, { force: true }).catch(() => {});
 
   const info = await probe(mainOut);
   const n = scenes.length + 1;
@@ -1523,6 +1543,54 @@ async function builtinTransitions() {
     if (fs.existsSync(f)) out.push({ id: b.id, builtin: true, path: f, url: pathToFileURL(f).href, name: b.name, isImage: false, hasAudio: false, duration: b.d });
   }
   return out;
+}
+
+// A black video (with silence) of `dur` seconds, at the size of `likeFile`.
+async function blackClip(out, dur, likeFile, fps = 30) {
+  const info = likeFile && fs.existsSync(likeFile) ? await probe(likeFile) : {};
+  const w = Math.max(2, Math.round((info.width || 1280) / 2) * 2);
+  const h = Math.max(2, Math.round((info.height || 720) / 2) * 2);
+  const D = Math.max(0.1, dur).toFixed(3);
+  await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', `color=black:s=${w}x${h}:r=${fps}:d=${D}`,
+    '-f', 'lavfi', '-t', D, '-i', 'anullsrc=r=48000:cl=stereo',
+    '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', String(fps),
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-t', D, '-movflags', '+faststart', out]);
+  return out;
+}
+
+// Lessons hurt by the older "new scene" (it dropped the camera / screen file
+// when a scene was recorded without it): if the file is still in "originais"
+// (or put back from the Recycle Bin), it is linked again and completed with
+// black up to the lesson's length.
+async function repairTracks(folder) {
+  const proj = await readProject(folder);
+  if (!proj || !proj.originals || !proj.originals.main) return { repaired: [] };
+  const odir = path.join(folder, 'originais');
+  const main = path.join(folder, proj.originals.main);
+  if (!fs.existsSync(main)) return { repaired: [] };
+  const total = (await probe(main)).duration || proj.duration || 0;
+  const originals = { ...proj.originals };
+  const repaired = [];
+  for (const [k, name] of [['camera', 'camera.mp4'], ['screen', 'tela.mp4']]) {
+    const cur = originals[k] ? path.join(folder, originals[k]) : null;
+    if (cur && fs.existsSync(cur)) continue;
+    const f = path.join(odir, name);
+    if (!fs.existsSync(f)) continue;
+    const d = (await probe(f)).duration || 0;
+    if (d < total - 1) {
+      const blk = await blackClip(path.join(odir, `${k}-preto-reparo.mp4`), total - d, f, proj.fps || 30);
+      const tmp = path.join(odir, `${k} (reparando).mp4`);
+      await concatVideos([f, blk], tmp);
+      await fsp.rm(blk, { force: true });
+      await fsp.rename(f, path.join(odir, `${name.replace('.mp4', '')} (antes do reparo).mp4`));
+      await fsp.rename(tmp, f);
+    }
+    originals[k] = path.relative(folder, f);
+    repaired.push(k);
+  }
+  if (repaired.length) await writeProject(folder, { originals });
+  return { repaired };
 }
 
 // ---------------------------------------------------------------- IPC
@@ -2006,6 +2074,7 @@ function registerIpc() {
 
   // --- gallery
   ipcMain.handle('gallery:list', (_e, dir) => listGallery(dir || defaultOutDir()));
+  ipcMain.handle('project:repair', (_e, folder) => (folder ? repairTracks(folder) : { repaired: [] }));
   ipcMain.handle('gallery:item', (_e, folder) => (folder && fs.existsSync(folder) ? galleryItemFromFolder(folder) : null));
   ipcMain.handle('gallery:rename', (_e, item, title) => renameItem(item, title));
   ipcMain.handle('gallery:trash', async (_e, item) => {

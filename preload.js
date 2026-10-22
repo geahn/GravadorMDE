@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('api', {
     add: () => ipcRenderer.invoke('transition:add'),
     remove: (file) => ipcRenderer.invoke('transition:remove', file),
   },
+  repairProject: (folder) => ipcRenderer.invoke('project:repair', folder),
   saveProject: (folder, patch) => ipcRenderer.invoke('project:save', folder, patch),
   mde: {
     info: () => ipcRenderer.invoke('mde:info'),

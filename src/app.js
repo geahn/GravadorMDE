@@ -2673,10 +2673,27 @@ function showWatch(item) {
   });
 }
 
-function editItem(item) {
+async function editItem(item) {
   if (R.state !== 'idle' || busyElsewhere()) {
     toast('Termine a gravação ou a exportação atual primeiro.');
     return;
+  }
+  // Camera / screen files dropped by an older version are linked again when they are still there.
+  if (item.kind === 'project' && item.edit.original && (item.edit.tracks || []).length < 2) {
+    showBusy(true, 'Conferindo os arquivos da aula…');
+    try {
+      const r = await api.repairProject(item.folder);
+      if (r && r.repaired && r.repaired.length) {
+        const fresh = await api.gallery.item(item.folder);
+        if (fresh) item = fresh;
+        toast(`Arquivo${r.repaired.length > 1 ? 's' : ''} da ${r.repaired.map((k) => (k === 'camera' ? 'câmera' : 'tela')).join(' e ')} recuperado${r.repaired.length > 1 ? 's' : ''}: dá para trocar o layout de novo.`, 'ok', 7000);
+        gallery.markStale();
+      }
+    } catch (err) {
+      toast(`Não consegui recuperar os arquivos separados. ${cleanError(err)}`, 'error', 8000);
+    } finally {
+      showBusy(false);
+    }
   }
   const e = item.edit;
   closeModals();
