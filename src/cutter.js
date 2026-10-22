@@ -206,6 +206,20 @@ export class Cutter {
       this.pendingPreview = url;
       if (!this.playing) this.usePreview();
     };
+    this.audioUrl = project.url;
+    if (project.hasAudio !== false) {
+      this.api.media.previewAudio(project.path).then((url) => {
+        if (this.p !== project || !url) return;
+        this.audioUrl = url;
+        const t = this.audio.currentTime;
+        const was = !this.audio.paused;
+        this.audio.src = url;
+        this.audio.addEventListener('loadedmetadata', () => {
+          this.audio.currentTime = t;
+          if (was && this.playing) this.syncAudio(true);
+        }, { once: true });
+      }).catch(() => {});
+    }
     this.api.media.previewVideo(project.path).then(useWhenReady)
       .then(() => this.api.media.proxyVideo(project.path)).then(useWhenReady).catch(() => {});
     if (project.folder && !project.editingFinal) {
@@ -277,7 +291,8 @@ export class Cutter {
 
   restoreMedia() {
     if (!this.p) return;
-    for (const v of [this.thumbVideo, this.audio]) v.src = this.p.url;
+    this.thumbVideo.src = this.p.url;
+    this.audio.src = this.audioUrl || this.p.url;
     for (const v of this.players) v.src = this.videoUrl || this.p.url;
     this.clipUrl = null;
     this.restoreRecomp();
@@ -344,9 +359,9 @@ export class Cutter {
     // While a seek is still running, asking for another one restarts it: when
     // the timeline is scrubbed the sound could keep seeking forever (silence).
     // Only the last position is kept, and applied once the seek ends.
-    if (au.seeking) {
+    if (au.seeking || au.readyState < 1) {
       this.audioWant = want;
-    } else if (force || Math.abs(au.currentTime - want) > 0.12) {
+    } else if (force || Math.abs(au.currentTime - want) > 0.15) {
       this.audioWant = null;
       au.currentTime = want;
     }
@@ -362,14 +377,15 @@ export class Cutter {
     const t = au.currentTime;
     const w = this.audioWatch || (this.audioWatch = { t, at: now, fixes: 0 });
     if (Math.abs(t - w.t) > 0.01 || au.paused) { w.t = t; w.at = now; return; }
-    if (now - w.at < 900) return;
+    // a seek still running is not "stuck" (unless it takes far too long)
+    if (now - w.at < (au.seeking ? 4000 : 1200)) return;
     w.at = now;
     w.fixes += 1;
     const want = this.active.currentTime - this.audioDelay / 1000;
     if (this.ac && this.ac.state !== 'running') this.ac.resume().catch(() => {});
     if (au.error || w.fixes % 2 === 0) {
       // reload the element (keeps the Web Audio routing: same element)
-      const src = this.p && this.p.url;
+      const src = this.audioUrl || (this.p && this.p.url);
       if (src) {
         au.src = src;
         au.addEventListener('loadedmetadata', () => {

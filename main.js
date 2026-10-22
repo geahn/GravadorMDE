@@ -2111,6 +2111,25 @@ function registerIpc() {
     }
     return pathToFileURL(out).href;
   });
+  // Sound-only copy for the editor's audio player: seeking in it is instant
+  // (seeking the big video file for its sound could take seconds after a cut).
+  ipcMain.handle('media:previewAudio', async (_e, file) => {
+    const st = await fsp.stat(file);
+    const dir = path.join(os.tmpdir(), 'gravador-previas');
+    await fsp.mkdir(dir, { recursive: true });
+    const hash = require('crypto').createHash('sha1').update(`audio|${file}|${st.size}|${st.mtimeMs}`).digest('hex').slice(0, 16);
+    const out = path.join(dir, `${hash}.m4a`);
+    if (!fs.existsSync(out)) {
+      const tmpOut = `${out}.part.m4a`;
+      try {
+        await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-vn', '-c:a', 'copy', '-movflags', '+faststart', tmpOut]);
+      } catch {
+        await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-vn', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmpOut]);
+      }
+      await fsp.rename(tmpOut, out);
+    }
+    return pathToFileURL(out).href;
+  });
   ipcMain.handle('media:previewVideo', async (_e, file) => {
     const st = await fsp.stat(file);
     const dir = path.join(os.tmpdir(), 'gravador-previas');
