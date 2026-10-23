@@ -2,7 +2,7 @@ import {
   DIMS, PRESETS, BACKGROUNDS, MAX_LAYOUTS, defaultScene, defaultLayouts, makeLayout, newId,
 } from './layouts.js';
 import { Compositor, Feed, createTicker, BG_PATTERNS, patternCanvas, cropFor } from './compositor.js';
-import { cssFilter, FX_PRESETS } from './fx.js';
+import { cssFilter, FX_PRESETS, FX_KEYS, isNeutral } from './fx.js';
 import { BEAUTY_KEYS, beautyOn } from './beauty.js';
 import { STICKERS, stickerUrl, TEXT_STYLES, BASE_STYLE } from './textstyles.js';
 import { bindFields, textPropsHTML, styleCardsHTML, paintStyleCards, posHTML, range as fRange, color as fColor } from './cutpanel.js';
@@ -68,6 +68,7 @@ const prefs = {
   sysGain: 1, // volume of the computer audio while recording
   camControls: {}, // per camera (by name): image controls set in "Ajustes de imagem da câmera"
   cameraFilter: null, // { name, p }: color filter applied live to the camera
+  camSoft: {}, // per camera (by name): image adjustments made by the app when the camera has none of its own
   userTextStyles: [], // text styles saved by the user
   userFilters: [], // color filters saved by the user
   liveOverlays: [], // texts / images / stickers drawn live into the recording
@@ -941,6 +942,7 @@ async function setCamera(id) {
   $('#cam-adj').hidden = !id;
   $('#beauty').hidden = !id;
   if (id && feeds.camera) reapplyCamControls();
+  applyCamLook();
   if ($('#cam-adj').open) loadCamControls();
 }
 
@@ -1349,12 +1351,8 @@ function fmtCamValue(key, v, c = null) {
 function renderCamControls() {
   const body = $('#cam-adj-body');
   const d = camCtl;
-  if (!d || !d.supported) {
-    body.innerHTML = '<p class="cam-adj-note">Disponível no Windows.</p>';
-    return;
-  }
-  if (!d.found) {
-    body.innerHTML = '<p class="cam-adj-note">Esta câmera não oferece ajustes de imagem pelo Windows (comum em câmeras virtuais).</p>';
+  if (!d || !d.supported || !d.found) {
+    renderSoftControls('Esta câmera não aceita ajustes direto nela (comum em câmeras virtuais).');
     return;
   }
   const row = (group, key, label) => {
@@ -1372,9 +1370,36 @@ function renderCamControls() {
   const rows = [...CAM_PROC.map(([k, l]) => row('proc', k, l)), ...CAM_CAM.map(([k, l]) => row('cam', k, l))].join('');
   body.innerHTML = `${d.plf ? `<div class="cam-adj-row"><div class="cam-adj-lab"><span>Anti-flicker</span></div>
       <div class="seg">${PLF.map(([v, l]) => `<button data-cc-plf="${v}" class="${d.plf.val === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>` : ''}
-    ${rows || '<p class="cam-adj-note">Esta câmera não oferece ajustes de imagem (câmeras virtuais, como a OBSBOT Virtual Camera, são ajustadas no app delas).</p>'}
-    <div class="cam-adj-foot"><span>Os ajustes vão direto para a câmera e ficam salvos para ela.</span>
-      <button class="btn sm" id="cam-adj-reset">Restaurar padrão</button></div>`;
+    ${rows ? `${rows}<div class="cam-adj-foot"><span>Os ajustes vão direto para a câmera e ficam salvos para ela.</span>
+      <button class="btn sm" id="cam-adj-reset">Restaurar padrão</button></div>` : ''}`;
+  if (!rows) renderSoftControls('Esta câmera não aceita ajustes direto nela (comum em câmeras virtuais).', true);
+}
+
+// Adjustments made by the app on the picture (any camera, virtual ones too).
+const SOFT_KEYS = ['brightness', 'contrast', 'saturation', 'hue', 'temperature', 'tint', 'sharpen'];
+function renderSoftControls(why, append = false) {
+  const body = $('#cam-adj-body');
+  const v = (prefs.camSoft || {})[camLabel()] || {};
+  const html = `<p class="cam-adj-note">${why} Então o app ajusta a imagem ele mesmo: fica salvo para esta câmera e gravado no vídeo.</p>
+    ${FX_KEYS.filter((k) => SOFT_KEYS.includes(k.key)).map((k) => {
+    const val = Number(v[k.key]) || 0;
+    return `<div class="cam-adj-row"><div class="cam-adj-lab"><span>${k.label}</span><output data-soft-out="${k.key}">${val > 0 ? '+' : ''}${val}${k.unit || ''}</output></div>
+      <input type="range" data-soft="${k.key}" min="${k.min}" max="${k.max}" step="1" value="${val}" style="--p:${((val - k.min) / (k.max - k.min)) * 100}%" /></div>`;
+  }).join('')}
+    <div class="cam-adj-foot"><span></span><button class="btn sm" id="cam-soft-reset">Zerar ajustes</button></div>`;
+  if (append) body.insertAdjacentHTML('beforeend', html);
+  else body.innerHTML = html;
+}
+
+function setSoft(key, value) {
+  const label = camLabel();
+  if (!label) return;
+  const cur = { ...((prefs.camSoft || {})[label] || {}) };
+  if (key === null) Object.keys(cur).forEach((k) => delete cur[k]);
+  else if (value) cur[key] = value; else delete cur[key];
+  prefs.camSoft = { ...(prefs.camSoft || {}), [label]: cur };
+  applyCamLook();
+  persist();
 }
 
 // Sends changes to the camera (throttled while a slider moves) and remembers them.
@@ -1461,6 +1486,15 @@ function bindCamControls() {
   const body = $('#cam-adj-body');
   $('#cam-adj').addEventListener('toggle', (e) => { if (e.target.open) loadCamControls(); });
   body.addEventListener('input', (e) => {
+    const sr = e.target.closest('[data-soft]');
+    if (sr) {
+      setRangeFill(sr);
+      const k = FX_KEYS.find((x) => x.key === sr.dataset.soft);
+      const v = Number(sr.value);
+      $(`[data-soft-out="${sr.dataset.soft}"]`, body).textContent = `${v > 0 ? '+' : ''}${v}${(k && k.unit) || ''}`;
+      setSoft(sr.dataset.soft, v);
+      return;
+    }
     const r = e.target.closest('[data-cc]');
     if (!r) return;
     const [group, prop] = r.dataset.cc.split('.');
@@ -1478,6 +1512,11 @@ function bindCamControls() {
     renderCamControls();
   });
   body.addEventListener('click', (e) => {
+    if (e.target.closest('#cam-soft-reset')) {
+      setSoft(null);
+      renderCamControls();
+      return;
+    }
     const p = e.target.closest('[data-cc-plf]');
     if (p) {
       camSend([{ group: 'plf', prop: '-', value: Number(p.dataset.ccPlf), auto: false }]);
@@ -3112,10 +3151,22 @@ async function finishLayoutLog() {
 let camFxN = 0;
 function setCameraFilter(f) {
   prefs.cameraFilter = f || null;
-  camFxN += 1;
-  compositor.camFilter = f ? cssFilter(f.p, `cam-fx-${camFxN}`, { blurScale: 1 }) : 'none';
+  applyCamLook();
   persist();
   renderCamFilters();
+}
+
+// The camera's look: the app's own image adjustments for this camera plus the chosen filter.
+function applyCamLook() {
+  const soft = (prefs.camSoft || {})[camLabel()] || {};
+  const f = prefs.cameraFilter && prefs.cameraFilter.p ? prefs.cameraFilter.p : {};
+  const p = {};
+  for (const k of FX_KEYS) {
+    const v = (Number(soft[k.key]) || 0) + (Number(f[k.key]) || 0);
+    if (v) p[k.key] = Math.max(k.min, Math.min(k.max, v));
+  }
+  camFxN += 1;
+  compositor.camFilter = isNeutral(p) ? 'none' : cssFilter(p, `cam-fx-${camFxN}`, { blurScale: 1 });
 }
 
 // "O que você vai gravar?" -> Câmera: filter chips, each one showing the camera itself.
