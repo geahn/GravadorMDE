@@ -575,11 +575,14 @@ export class CutPanel {
       <div class="cs-head"><h4>Áudio</h4></div>
       <div class="cs-props" data-audio>
         <div class="cs-subtitle">Volumes</div>
-        ${range('master', 'Master (volume final)', a.master, 0, 2, 0.01, 'pct')}
-        ${range('mic', 'Microfone', a.mic, 0, 2, 0.01, 'pct')}
-        ${side ? range('sys', 'Áudio do computador (tela)', a.sys, 0, 2, 0.01, 'pct')
-    : '<p class="cs-note">O áudio do computador não foi gravado separado nesta aula. Nas próximas, com “áudio do computador” ligado, dá para equilibrar microfone e computador aqui.</p>'}
-        ${range('media', 'Vídeos inseridos', a.media, 0, 2, 0.01, 'pct')}
+        <p class="cs-note">O som da aula vem só do microfone escolhido e, se estava ligado, do áudio do computador. A câmera não grava som.</p>
+        ${range('master', 'Master (volume final)', a.master, 0, 3, 0.01, 'pct')}
+        ${range('mic', 'Microfone', a.mic, 0, 3, 0.01, 'pct')}
+        ${side ? range('sys', 'Áudio do computador (tela)', a.sys, 0, 3, 0.01, 'pct')
+    : '<p class="cs-note">Esta aula foi gravada antes de o microfone e o computador serem salvos separados: o volume do computador não é ajustável aqui.</p>'}
+        ${range('media', 'Vídeos inseridos', a.media, 0, 3, 0.01, 'pct')}
+        ${range('intro', 'Abertura (intro)', a.intro ?? 1, 0, 3, 0.01, 'pct')}
+        ${range('trans', 'Transições', a.trans ?? 1, 0, 3, 0.01, 'pct')}
         <div class="cs-subtitle">Equalizador</div>
         <div class="cs-chips">${EQ_PRESETS.map(([n, v]) => `<button data-eq='${JSON.stringify(v)}' class="${a.bass === v.bass && a.mid === v.mid && a.treble === v.treble ? 'on' : ''}">${n}</button>`).join('')}</div>
         ${range('bass', 'Grave', a.bass, -12, 12, 0.5, 'db')}

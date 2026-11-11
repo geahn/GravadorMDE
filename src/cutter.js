@@ -28,7 +28,7 @@ const SPEEDS = [1, 1.5, 2, 3, 4];
 const MAX_OV_ROWS = 4;
 const font = '"Segoe UI Variable Text", "Segoe UI", sans-serif';
 
-export const AUDIO_FX_DEFAULT = { master: 1, mic: 1, sys: 1, media: 1, bass: 0, mid: 0, treble: 0, denoise: 0, gate: false };
+export const AUDIO_FX_DEFAULT = { master: 1, mic: 1, sys: 1, media: 1, intro: 1, trans: 1, bass: 0, mid: 0, treble: 0, denoise: 0, gate: false };
 
 const KIND_COLOR = { text: '#7b80ff', image: '#38bdf8', video: '#f472b6', sticker: '#a78bfa', emoji: '#a78bfa' };
 const SCENE_COLORS = ['#3b4252', '#2f4858', '#3f3a5a', '#3a4a3a', '#524036', '#33465a'];
@@ -433,7 +433,8 @@ export class Cutter {
     } catch {
       this.audio.volume = clamp(Number(fx.master) || 0, 0, 1);
     }
-    for (const r of this.res.values()) if (r.video) r.video.volume = clamp((r.vol ?? 1) * fx.media * fx.master * this.srcOn('media'), 0, 1);
+    for (const r of this.res.values()) if (r.video) r.video.volume = clamp((r.vol ?? 1) * fx.media * fx.master, 0, 1);
+    if (this.clip) this.clip.volume = this.transVol();
   }
 
   // ---------------------------------------------------------------- time math
@@ -468,11 +469,10 @@ export class Cutter {
     return out.filter(([a, b]) => b - a >= 1 / this.fps);
   }
 
-  // 1 when that sound goes into the export (Configurações → Áudio da exportação), else 0.
-  srcOn(k) {
-    const def = { mic: true, sys: true, media: false, intro: false, trans: false };
-    const on = { ...def, ...((this.getAudioSources && this.getAudioSources()) || {}) };
-    return on[k] ? 1 : 0;
+  // Preview volume of the transitions (their slider, with the master).
+  transVol() {
+    const fx = this.audioFx || {};
+    return clamp((fx.trans ?? 1) * (fx.master ?? 1), 0, 1);
   }
 
   // Transitions: each insert is { at: source time, tr: id in the library (null = the first one) }.
@@ -1509,7 +1509,7 @@ export class Cutter {
       live.add(v);
       const { o0, o1 } = this.span(o);
       r.vol = o.volume ?? 1;
-      v.volume = clamp(r.vol * this.audioFx.media * this.audioFx.master * this.srcOn('media'), 0, 1);
+      v.volume = clamp(r.vol * this.audioFx.media * this.audioFx.master, 0, 1);
       v.muted = r.vol <= 0.001;
       if (t >= o0 && t < o1) {
         const want = (o.trim || 0) + (t - o0);
@@ -1961,7 +1961,7 @@ export class Cutter {
     cancelAnimationFrame(this.raf);
     for (const v of [...this.players, this.clip, this.audio]) v.pause();
     for (const r of this.res.values()) if (r.video) r.video.pause();
-    this.clip.volume = this.srcOn('trans');
+    this.clip.volume = this.transVol();
     this.renderPlay();
     this.renderTime();
     if (this.pendingPreview) this.usePreview();
@@ -2067,7 +2067,7 @@ export class Cutter {
     } else {
       if (this.prerolled !== this.clip) this.useClip(nx);
       this.clip.currentTime = 0;
-      this.clip.volume = this.srcOn('trans');
+      this.clip.volume = this.transVol();
       this.clip.play().catch(() => {});
       this.prerolled = null;
       this.show(this.clip);
