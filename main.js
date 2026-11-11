@@ -453,14 +453,24 @@ const AUDIO_FX_DEFAULT = { master: 1, mic: 1, sys: 1, media: 1, bass: 0, mid: 0,
 // The lesson's audio source: the recorded mix, or (when the separate microphone
 // and computer-audio files exist and their volumes were changed) a new mix.
 // Adds inputs/lines and returns the pad label to read from.
+// Which sounds go into the exported video. By default only the voice (the
+// chosen microphone) and the computer's sound; the sound of videos inserted in
+// the editor, of the opening clip and of the transitions only when turned on
+// (Configurações → Áudio da exportação).
+const AUDIO_SOURCES_DEFAULT = { mic: true, sys: true, media: false, intro: false, trans: false };
+const audioSources = (job) => ({ ...AUDIO_SOURCES_DEFAULT, ...(job.audioSources || {}) });
+
 function lessonAudio({ inputs, lines, next, job, afx, hasAudio }) {
+  const on = audioSources(job);
+  const micG = on.mic ? afx.mic : 0;
+  const sysG = on.sys ? afx.sys : 0;
   const side = job.sidecars;
-  const useSide = side && side.mic && side.sys && fs.existsSync(side.mic) && fs.existsSync(side.sys)
-    && (Math.abs(afx.mic - 1) > 0.001 || Math.abs(afx.sys - 1) > 0.001);
-  if (useSide) {
+  const hasSide = side && side.mic && side.sys && fs.existsSync(side.mic) && fs.existsSync(side.sys);
+  // With the voice and the computer's sound saved apart, each gets its own volume (or is left out).
+  if (hasSide && (Math.abs(micG - 1) > 0.001 || Math.abs(sysG - 1) > 0.001)) {
     inputs.push('-i', side.mic, '-i', side.sys);
-    lines.push(`[${next}:a]${AUDIO_IN},volume=${afx.mic.toFixed(3)}[smic]`);
-    lines.push(`[${next + 1}:a]${AUDIO_IN},volume=${afx.sys.toFixed(3)}[ssys]`);
+    lines.push(`[${next}:a]${AUDIO_IN},volume=${micG.toFixed(3)}[smic]`);
+    lines.push(`[${next + 1}:a]${AUDIO_IN},volume=${sysG.toFixed(3)}[ssys]`);
     lines.push('[smic][ssys]amix=inputs=2:normalize=0:duration=longest[srcA]');
     return { label: 'srcA', next: next + 2, vol: '' };
   }
@@ -468,7 +478,8 @@ function lessonAudio({ inputs, lines, next, job, afx, hasAudio }) {
     inputs.push('-f', 'lavfi', '-t', String(job.duration), '-i', 'anullsrc=r=48000:cl=stereo');
     return { label: `${next}:a`, next: next + 1, vol: '' };
   }
-  return { label: '0:a', next, vol: Math.abs(afx.mic - 1) > 0.001 ? `,volume=${afx.mic.toFixed(3)}` : '' };
+  // Recorded without the computer's sound: the track is the voice alone.
+  return { label: '0:a', next, vol: Math.abs(micG - 1) > 0.001 ? `,volume=${micG.toFixed(3)}` : '' };
 }
 
 async function runExport(job) {
@@ -626,7 +637,7 @@ async function runExport(job) {
       next = c.next;
       const D = intro.duration.toFixed(3);
       graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS[iv]`);
-      graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${intro.hasAudio ? clipLevel(introGain) : ''}[ia]`);
+      graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${intro.hasAudio && audioSources(job).intro ? clipLevel(introGain) : ',volume=0'}[ia]`);
       order.push('[iv][ia]');
     }
     // each transition clip once, split into as many copies as it is used
@@ -649,7 +660,7 @@ async function runExport(job) {
         const labels = idx.map((i, k) => { xLabel.set(i, j + k); return j + k; });
         j += n;
         if (!audioOnly) graph.push(`[${c.v}]${FIT},fps=${fps},format=yuv420p,trim=duration=${D},setpts=PTS-STARTPTS${n > 1 ? `,split=${n}` : ''}${labels.map((q) => `[tv${q}]`).join('')}`);
-        graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${clip.hasAudio ? clipLevel(transGain.get(clip.path) || 0) : ''}${n > 1 ? `,asplit=${n}` : ''}${labels.map((q) => `[ta${q}]`).join('')}`);
+        graph.push(`[${c.a}]${AUDIO_IN},apad,atrim=duration=${D},asetpts=PTS-STARTPTS${clip.hasAudio && audioSources(job).trans ? clipLevel(transGain.get(clip.path) || 0) : ',volume=0'}${n > 1 ? `,asplit=${n}` : ''}${labels.map((q) => `[ta${q}]`).join('')}`);
       }
     }
     let si = 0;
@@ -688,7 +699,7 @@ async function runExport(job) {
         if (/\.gif$/i.test(vid.path)) inputs.push('-ignore_loop', '0', '-t', D.toFixed(3), '-i', vid.path); // GIFs loop
         else inputs.push('-ss', String(Math.max(0, vid.trim || 0)), '-t', D.toFixed(3), '-i', vid.path);
         next += 1;
-        if (vid.hasAudio && (vid.volume ?? 1) > 0.001) {
+        if (vid.hasAudio && audioSources(job).media && (vid.volume ?? 1) > 0.001) {
           const vol = (vid.volume ?? 1) * afx.media;
           const ms = Math.round(A * 1000);
           extraAudio.push(`[${idx}:a]${AUDIO_IN},volume=${vol.toFixed(3)},afade=t=in:d=0.05,afade=t=out:st=${Math.max(0, D - 0.08).toFixed(3)}:d=0.08,adelay=delays=${ms}:all=1[oa${ovN}]`);

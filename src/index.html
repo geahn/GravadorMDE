@@ -305,6 +305,28 @@
           <div class="set-label"><b>Nivelar o áudio</b><small>Iguala trechos baixos e altos, evita estouros e deixa tudo em −16 LUFS (padrão de aulas e podcasts).</small></div>
           <input type="checkbox" class="switch" id="set-level" />
         </div>
+        <h4 class="set-group">Áudio da exportação</h4>
+        <p class="set-note">O que entra no som do vídeo exportado. Por padrão, só a sua voz (o microfone escolhido) e o som do computador, se ele foi gravado.</p>
+        <div class="set-row">
+          <div class="set-label"><b>Microfone (sua voz)</b><small>O microfone escolhido em “O que você vai gravar?”.</small></div>
+          <input type="checkbox" class="switch" data-asrc="mic" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Som do computador</b><small>O que tocou no computador durante a gravação (quando “Áudio do computador” estava ligado).</small></div>
+          <input type="checkbox" class="switch" data-asrc="sys" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Som dos vídeos inseridos no editor</b><small>Vídeos colocados como sobreposição (aba Mídia).</small></div>
+          <input type="checkbox" class="switch" data-asrc="media" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Som da abertura</b><small>O vídeo de intro do começo da aula.</small></div>
+          <input type="checkbox" class="switch" data-asrc="intro" />
+        </div>
+        <div class="set-row">
+          <div class="set-label"><b>Som das transições</b><small>Os clipes colocados entre os trechos.</small></div>
+          <input type="checkbox" class="switch" data-asrc="trans" />
+        </div>
         <div class="set-row" hidden>
           <div class="set-label"><b>Guardar também a gravação original</b><small>Desligado, o original vai para a Lixeira depois de exportar.</small></div>
           <input type="checkbox" class="switch" id="set-keep" />

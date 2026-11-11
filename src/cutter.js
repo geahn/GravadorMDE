@@ -433,7 +433,7 @@ export class Cutter {
     } catch {
       this.audio.volume = clamp(Number(fx.master) || 0, 0, 1);
     }
-    for (const r of this.res.values()) if (r.video) r.video.volume = clamp((r.vol ?? 1) * fx.media * fx.master, 0, 1);
+    for (const r of this.res.values()) if (r.video) r.video.volume = clamp((r.vol ?? 1) * fx.media * fx.master * this.srcOn('media'), 0, 1);
   }
 
   // ---------------------------------------------------------------- time math
@@ -466,6 +466,13 @@ export class Cutter {
     }
     if (cur < this.duration) out.push([cur, this.duration]);
     return out.filter(([a, b]) => b - a >= 1 / this.fps);
+  }
+
+  // 1 when that sound goes into the export (Configurações → Áudio da exportação), else 0.
+  srcOn(k) {
+    const def = { mic: true, sys: true, media: false, intro: false, trans: false };
+    const on = { ...def, ...((this.getAudioSources && this.getAudioSources()) || {}) };
+    return on[k] ? 1 : 0;
   }
 
   // Transitions: each insert is { at: source time, tr: id in the library (null = the first one) }.
@@ -1502,7 +1509,7 @@ export class Cutter {
       live.add(v);
       const { o0, o1 } = this.span(o);
       r.vol = o.volume ?? 1;
-      v.volume = clamp(r.vol * this.audioFx.media * this.audioFx.master, 0, 1);
+      v.volume = clamp(r.vol * this.audioFx.media * this.audioFx.master * this.srcOn('media'), 0, 1);
       v.muted = r.vol <= 0.001;
       if (t >= o0 && t < o1) {
         const want = (o.trim || 0) + (t - o0);
@@ -1954,7 +1961,7 @@ export class Cutter {
     cancelAnimationFrame(this.raf);
     for (const v of [...this.players, this.clip, this.audio]) v.pause();
     for (const r of this.res.values()) if (r.video) r.video.pause();
-    this.clip.volume = 1;
+    this.clip.volume = this.srcOn('trans');
     this.renderPlay();
     this.renderTime();
     if (this.pendingPreview) this.usePreview();
@@ -2060,7 +2067,7 @@ export class Cutter {
     } else {
       if (this.prerolled !== this.clip) this.useClip(nx);
       this.clip.currentTime = 0;
-      this.clip.volume = 1;
+      this.clip.volume = this.srcOn('trans');
       this.clip.play().catch(() => {});
       this.prerolled = null;
       this.show(this.clip);

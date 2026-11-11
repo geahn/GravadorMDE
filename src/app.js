@@ -68,6 +68,8 @@ const prefs = {
   sysGain: 1, // volume of the computer audio while recording
   camControls: {}, // per camera (by name): image controls set in "Ajustes de imagem da câmera"
   cameraFilter: null, // { name, p }: color filter applied live to the camera
+  // what goes into the exported sound (Configurações → Vídeo final → Áudio da exportação)
+  audioSources: { mic: true, sys: true, media: false, intro: false, trans: false },
   camSoft: {}, // per camera (by name): image adjustments made by the app when the camera has none of its own
   userTextStyles: [], // text styles saved by the user
   userFilters: [], // color filters saved by the user
@@ -217,6 +219,7 @@ const cutter = new Cutter({
   setPrefs: (patch) => { Object.assign(prefs, patch); persist(); },
   onNewScene: (project) => beginSceneAppend(project),
   onBusy: (on, title) => showBusy(on, title),
+  getAudioSources: () => prefs.audioSources || {},
   onSceneAdded: (project, res) => {
     gallery.markStale();
     if (res.warning) toast(res.warning, 'error', 9000);
@@ -1850,6 +1853,18 @@ function openTransitionPicker(opts) {
   m.hidden = false;
 }
 
+function bindAudioSources() {
+  prefs.audioSources = { mic: true, sys: true, media: false, intro: false, trans: false, ...(prefs.audioSources || {}) };
+  $$('[data-asrc]').forEach((el) => {
+    el.checked = !!prefs.audioSources[el.dataset.asrc];
+    el.addEventListener('change', () => {
+      prefs.audioSources = { ...prefs.audioSources, [el.dataset.asrc]: el.checked };
+      persist();
+      if (cutter.isOpen) cutter.applyAudioFx();
+    });
+  });
+}
+
 function bindTransitions() {
   const grid = $('#trans-grid');
   grid.addEventListener('click', (e) => {
@@ -2590,6 +2605,7 @@ async function exportProject(project, {
       trashOriginals: !!project.original && !keep,
       post: post || null,
       audioFx: audioFx || null,
+      audioSources: { ...prefs.audioSources },
       sidecars: sidecars || null,
       edits: edits || null,
     });
@@ -3275,6 +3291,7 @@ async function exportAudio(format) {
       folder: p.folder || null,
       format,
     });
+    job.audioSources = { ...prefs.audioSources };
   } catch (err) {
     toast(`Não consegui preparar o áudio. ${cleanError(err)}`, 'error');
     return;
@@ -3564,6 +3581,7 @@ bindSources();
 bindSettings();
 bindModals();
 bindTransitions();
+bindAudioSources();
 bindStudio();
 bindRecordingEvents();
 renderAll();
